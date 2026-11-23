@@ -11,6 +11,7 @@ App web del genitore per ricevere, cifrati, gli avvisi dall'app Android «Tutela
 1. Apri il sito in Safari › Condividi › **Aggiungi alla schermata Home**.
 2. Scegli un PIN, tocca **Abbina** e incolla il codice nell'app Tutela del figlio (Telefono del genitore). Confrontate il codice di verifica a 6 cifre.
 3. Apri *Notifiche* › **Attiva notifiche** › Consenti. Riceverai solo «Nuovo avviso da Tutela: apri l'app», mai il contenuto.
+4. (Facoltativo) Nella pagina principale, sezione *Sicurezza* › **Sblocca con Face ID** › conferma con Face ID. All'apertura l'app chiede subito Face ID; il PIN resta sempre valido. Il PIN si sblocca da solo all'ultima cifra.
 
 ## In locale
 ```bash

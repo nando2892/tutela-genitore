@@ -101,3 +101,7 @@ main { max-width: 520px; margin: 0 auto; padding: 24px 16px 40px; }
 .link { background: none; border: 0; padding: 12px 0 0; color: var(--primary); font: inherit; font-weight: 600; cursor: pointer; }
 .toggle { display: block; width: 100%; background: none; border: 0; text-align: left; padding: 6px 0 12px; color: var(--muted); font: inherit; font-size: 15px; cursor: pointer; }
 .card.archived { opacity: 0.75; }
+/* Wrong PIN (0.10.4): the field shakes and empties. */
+.shake { animation: shake 0.4s; border-color: var(--danger); }
+@keyframes shake { 0%, 100% { transform: translateX(0); } 20%, 60% { transform: translateX(-10px); } 40%, 80% { transform: translateX(10px); } }
+@media (prefers-reduced-motion: reduce) { .shake { animation: none; } }

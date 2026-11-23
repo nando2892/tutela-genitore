@@ -3,8 +3,9 @@
 // last contact time. Alerts and reports are NOT stored: at every opening they are rebuilt by decrypting what
 // ntfy.sh still keeps (about 12 hours, ciphertext only), including our own "close" messages.
 import * as L from './link.js';
+import * as Bio from './bio.js';
 
-const VERSION = '0.10.3';
+const VERSION = '0.10.4';
 const SILENT_MS = 60 * 60 * 1000;            // like LinkPolicy: warning after 1 hour without messages
 const MAX_AGE_S = 24 * 60 * 60;              // reject messages published > 24 h after they were written (replays)
 const LOCK_AFTER_MS = 5 * 60 * 1000;         // PIN again after 5 minutes in the background
@@ -42,6 +43,7 @@ const S = {
   child: null,       // { spki (b64), verification }
   keys: null,
   pin: null, unlocked: false, hiddenAt: 0, pinFails: 0, pinWaitUntil: 0,
+  bio: null, bioAvailable: false, bioAuto: true, bioBusy: false, // Face ID (WebAuthn passkey), 0.10.4
   sent: 0, seenMax: 0, lastSeenSaved: 0,
   alerts: [], reports: new Map(), state: null, detail: '', lastSeen: 0, lastStatus: 0,
   lastId: 'all', lastC2P: 0, lastP2C: 0,
@@ -95,7 +97,8 @@ async function pinHash(pin, salt, iterations) {
 }
 async function setPin(pin) {
   const salt = crypto.getRandomValues(new Uint8Array(16));
-  S.pin = { salt: L.b64(salt), hash: L.b64(await pinHash(pin, salt, PBKDF2_ITERATIONS)), iterations: PBKDF2_ITERATIONS };
+  // len: lets the lock screen unlock by itself at the last digit (no "Sblocca" tap).
+  S.pin = { salt: L.b64(salt), hash: L.b64(await pinHash(pin, salt, PBKDF2_ITERATIONS)), iterations: PBKDF2_ITERATIONS, len: pin.length };
   await db.set('pin', S.pin);
 }
 async function checkPin(pin) {
@@ -402,10 +405,18 @@ function page(r) {
 }
 
 function pinPage(title, sub, choosing, change) {
-  const input = h('input', { class: 'pin-input', type: 'password', inputmode: 'numeric', autocomplete: 'off', maxlength: '12', 'aria-label': 'PIN' });
+  const lockLen = !choosing && S.pin && S.pin.len ? S.pin.len : 0;
+  const input = h('input', { class: 'pin-input', type: 'password', inputmode: 'numeric', autocomplete: 'off', maxlength: String(lockLen || 12), 'aria-label': 'PIN' });
   const again = choosing ? h('input', { class: 'pin-input', type: 'password', inputmode: 'numeric', autocomplete: 'off', maxlength: '12', placeholder: 'ripeti', 'aria-label': 'Ripeti il PIN' }) : null;
   const err = h('p', { class: 'err' });
-  const submit = async () => {
+  let checking = false;
+  const wrong = text => {
+    input.value = ''; err.textContent = text;
+    input.classList.remove('shake'); void input.offsetWidth; input.classList.add('shake');
+    try { navigator.vibrate && navigator.vibrate(180); } catch { /* not supported (iPhone) */ }
+  };
+  // probe: PIN saved before 0.10.4, length unknown: try silently from the 6th digit on, never count it as an error.
+  const submit = async probe => {
     const pin = input.value.trim();
     if (choosing) {
       if (!/^\d{6,12}$/.test(pin)) { err.textContent = 'Usa da 6 a 12 cifre.'; return; }
@@ -415,21 +426,71 @@ function pinPage(title, sub, choosing, change) {
       if (change) go(''); else render();
       return;
     }
-    if (Date.now() < S.pinWaitUntil) { err.textContent = 'Troppi tentativi: riprova tra ' + Math.ceil((S.pinWaitUntil - Date.now()) / 1000) + ' s.'; return; }
-    btn.disabled = true;
-    if (await checkPin(pin)) { S.unlocked = true; S.pinFails = 0; render(); connect(); return; }
+    if (checking || !pin) return;
+    if (Date.now() < S.pinWaitUntil) { wrong('Troppi tentativi: riprova tra ' + Math.ceil((S.pinWaitUntil - Date.now()) / 1000) + ' s.'); return; }
+    checking = true; btn.disabled = true;
+    const ok = await checkPin(pin);
+    checking = false; btn.disabled = false;
+    if (ok) {
+      if (!S.pin.len) { S.pin.len = pin.length; db.set('pin', S.pin).catch(() => {}); }
+      S.unlocked = true; S.pinFails = 0; render(); connect(); return;
+    }
+    if (probe === true) { if (input.value !== pin && input.value.length >= 6) submit(true); return; }
     S.pinFails++;
     if (S.pinFails >= 5) { S.pinWaitUntil = Date.now() + 30000 * Math.pow(2, S.pinFails - 5); }
-    btn.disabled = false; input.value = ''; err.textContent = 'PIN errato.';
+    wrong('PIN errato.');
   };
-  const btn = h('button', { class: 'btn primary', onclick: submit }, choosing ? 'Salva PIN' : 'Sblocca');
-  const onKey = e => { if (e.key === 'Enter') submit(); };
+  const btn = h('button', { class: 'btn primary', hidden: lockLen > 0, onclick: () => submit(false) }, choosing ? 'Salva PIN' : 'Sblocca');
+  const onKey = e => { if (e.key === 'Enter') submit(false); };
   input.addEventListener('keydown', onKey); again && again.addEventListener('keydown', onKey);
-  setTimeout(() => input.focus(), 50);
+  if (!choosing) {
+    // Unlocks by itself at the last digit: no button to press.
+    input.addEventListener('input', () => {
+      const digits = input.value.replace(/\D/g, '');
+      if (digits !== input.value) input.value = digits;
+      if (digits.length) err.textContent = '';
+      if (lockLen) { if (digits.length === lockLen) submit(false); }
+      else if (digits.length >= 6) submit(true);
+    });
+  }
+  const bio = !choosing && S.bio
+    ? h('button', { class: 'btn ghost', onclick: () => bioUnlock(true) }, 'Sblocca con Face ID') : null;
+  if (bio && S.bioAuto) { S.bioAuto = false; setTimeout(() => bioUnlock(false), 300); }
+  else setTimeout(() => input.focus(), 50);
   return [h('div', { class: 'lock' },
     change ? header(title, true) : h('div', { class: 'head' }, shield(), h('h1', {}, title)),
-    h('p', { class: 'sub' }, sub), input, again, err, btn,
+    h('p', { class: 'sub' }, sub), input, again, err, btn, bio,
     change ? null : h('p', { class: 'caption center' }, 'Il PIN resta solo su questo telefono (PBKDF2). Se lo dimentichi: abbina di nuovo.'))];
+}
+
+// ---------- Face ID (WebAuthn passkey on this iPhone; the PIN always works too) ----------
+async function bioUnlock(manual) {
+  if (!S.bio || S.bioBusy || S.unlocked) return;
+  S.bioBusy = true;
+  try {
+    const r = await Bio.unlock(S.bio, location.hostname, location.origin, L.unb64);
+    if (r.ok) {
+      if (r.count) { S.bio.count = r.count; db.set('bio', S.bio).catch(() => {}); }
+      S.unlocked = true; S.pinFails = 0; render(); connect(); return;
+    }
+    if (manual) toast('Face ID non verificato: usa il PIN');
+  } catch (e) {
+    if (manual) toast(e && e.name === 'NotAllowedError' ? 'Face ID annullato: usa il PIN' : 'Face ID non disponibile: usa il PIN');
+  } finally { S.bioBusy = false; }
+}
+async function toggleBio() {
+  if (S.bio) {
+    if (!confirm('Disattivare lo sblocco con Face ID? Il PIN resta valido.')) return;
+    S.bio = null; await db.del('bio');
+    toast('Face ID disattivato'); render(); return;
+  }
+  try {
+    const rec = await Bio.register(location.hostname, location.origin); // straight from the tap: Face ID shows now
+    S.bio = rec; await db.set('bio', rec);
+    toast('Face ID attivato'); render();
+  } catch (e) {
+    toast(e && e.name === 'NotAllowedError' ? 'Attivazione annullata' : 'Face ID non attivato' + (e && e.message ? ': ' + e.message : ''));
+  }
 }
 
 function statusCard() {
@@ -479,7 +540,11 @@ function homePage() {
   out.push(navRow('🔔', 'Notifiche', pushLine(), () => go('notify'), true));
   out.push(h('div', { class: 'section' }, 'Sicurezza'));
   out.push(navRow('#', 'Cambia PIN', 'Serve il PIN attuale (già inserito)', () => go('pin')));
-  out.push(navRow('🔒', 'Blocca ora', 'Chiede di nuovo il PIN', () => { S.unlocked = false; render(); }));
+  if (S.bio || S.bioAvailable) {
+    out.push(navRow('☺', 'Sblocca con Face ID', S.bio ? 'Attivo · tocca per disattivarlo · il PIN resta valido'
+      : 'Disattivo · tocca per attivarlo · il PIN resta sempre valido', toggleBio));
+  }
+  out.push(navRow('🔒', 'Blocca ora', S.bio ? 'Chiede Face ID o il PIN' : 'Chiede di nuovo il PIN', () => { S.unlocked = false; render(); }));
   out.push(h('p', { class: 'caption center' }, 'Versione web ' + VERSION + ' · consegna tramite ntfy.sh (gratuito, solo testo cifrato) · '
     + 'gli avvisi restano cifrati sul server per circa 12 ore e non vengono salvati qui · solo prove con messaggi inventati [TUTELA-TEST]'));
   return out;
@@ -592,7 +657,7 @@ function notifyPage() {
 // ---------- Start ----------
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'hidden') { S.hiddenAt = Date.now(); return; }
-  if (S.hiddenAt && Date.now() - S.hiddenAt > LOCK_AFTER_MS) { S.unlocked = false; }
+  if (S.hiddenAt && Date.now() - S.hiddenAt > LOCK_AFTER_MS && S.unlocked) { S.unlocked = false; S.bioAuto = true; }
   try { navigator.clearAppBadge && navigator.clearAppBadge(); } catch { /* not supported */ }
   if (S.pair && !streamCtrl) connect();
   scheduleRender();
@@ -604,6 +669,7 @@ window.addEventListener('online', () => { drain(); if (!streamCtrl) connect(); }
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
   try {
     S.pin = await db.get('pin') || null;
+    S.bio = await db.get('bio') || null;
     S.pair = await db.get('pair') || null;
     S.child = await db.get('child') || null;
     S.showCode = !S.child;
@@ -619,6 +685,7 @@ window.addEventListener('online', () => { drain(); if (!streamCtrl) connect(); }
     return;
   }
   render();
+  Bio.available().then(v => { S.bioAvailable = v; scheduleRender(); });
   if (S.outbox.length) drain();
   if (pushSupported() && standalone()) { vapid().catch(() => {}); resendPush(false).then(scheduleRender); }
 })();
