@@ -10,7 +10,7 @@ App web del genitore per ricevere, cifrati, gli avvisi dall'app Android «Tutela
 ## Su iPhone
 1. Apri il sito in Safari › Condividi › **Aggiungi alla schermata Home**.
 2. Scegli un PIN, tocca **Abbina** e incolla il codice nell'app Tutela del figlio (Telefono del genitore). Confrontate il codice di verifica a 6 cifre.
-3. Per le notifiche: installa l'app gratuita **ntfy** e iscriviti al topic che trovi in *Notifiche su iPhone*. Riceverai solo «Nuovo avviso da Tutela: apri l'app», mai il contenuto.
+3. Apri *Notifiche* › **Attiva notifiche** › Consenti. Riceverai solo «Nuovo avviso da Tutela: apri l'app», mai il contenuto.
 
 ## In locale
 ```bash

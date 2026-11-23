@@ -4,7 +4,7 @@
 // ntfy.sh still keeps (about 12 hours, ciphertext only), including our own "close" messages.
 import * as L from './link.js';
 
-const VERSION = '0.10.2';
+const VERSION = '0.10.3';
 const SILENT_MS = 60 * 60 * 1000;            // like LinkPolicy: warning after 1 hour without messages
 const MAX_AGE_S = 24 * 60 * 60;              // reject messages published > 24 h after they were written (replays)
 const LOCK_AFTER_MS = 5 * 60 * 1000;         // PIN again after 5 minutes in the background
@@ -47,6 +47,7 @@ const S = {
   lastId: 'all', lastC2P: 0, lastP2C: 0,
   online: false, loaded: false, error: '', outbox: [], outboxWait: 5000,
   showCode: true, archived: new Map(), showArchived: false,
+  pushState: null, subscribed: false, pushSentEndpoint: null, pushError: '',
 };
 let streamCtrl = null, reconnectTimer = null, lastActivity = 0, queue = Promise.resolve();
 
@@ -161,6 +162,10 @@ function apply(m, receivedAt) {
       if (!m.heartbeat || m.text) S.detail = m.text;
       return changed || !m.heartbeat ? 'STATUS' : 'NONE';
     }
+    case 'PUSH':
+      S.pushState = m.outcome === L.PUSH_ACTIVE ? 'ok' : m.outcome === L.PUSH_EXPIRED ? 'expired' : S.pushState;
+      db.set('pushState', S.pushState).catch(() => {});
+      return 'NONE';
     default: return 'NONE';
   }
 }
@@ -186,6 +191,8 @@ async function handle(ev, live) {
         S.child = { spki: childB64, verification: k.verification };
         S.keys = k; S.showCode = false; // the code is no longer needed on screen
         await db.set('child', S.child);
+        S.pushState = null; db.del('pushState').catch(() => {});
+        if (S.subscribed) resendPush(true); // new pairing: hand the existing notification permission to the new child
       } else if (S.child.spki !== childB64) { S.error = 'Messaggio da un telefono non abbinato: ignorato.'; return; }
       await ensureKeys();
       const { header, plaintext } = await L.open(S.keys.c2p, L.C2P, ev.message, S.lastC2P);
@@ -279,18 +286,84 @@ async function drain() {
   scheduleRender();
 }
 
+// ---------- Web Push (0.10.3): the child's phone rings this web app directly, no server, no extra app ----------
+const standalone = () => window.matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
+const pushSupported = () => 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
+/** VAPID key pair for this phone; made in advance so the tap goes straight to the permission prompt. */
+async function vapid() {
+  let v = await db.get('vapid');
+  if (!v) {
+    const kp = await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign']);
+    v = { priv: L.b64(new Uint8Array(await crypto.subtle.exportKey('pkcs8', kp.privateKey))),
+          pub: L.b64(new Uint8Array(await crypto.subtle.exportKey('raw', kp.publicKey))) };
+    await db.set('vapid', v);
+  }
+  return v;
+}
+async function currentSubscription() {
+  if (!pushSupported()) return null;
+  const reg = await navigator.serviceWorker.getRegistration();
+  return reg ? reg.pushManager.getSubscription() : null;
+}
+/** Sends endpoint + keys + VAPID private key to the child, sealed in the E2E channel (never in clear). */
+async function sendPushSetup(sub, v) {
+  if (!await ensureKeys()) return false;
+  const j = sub.toJSON();
+  const msg = L.encodeMessage({ type: 'PUSH', time: Date.now(),
+    fragments: [j.endpoint, j.keys.p256dh, j.keys.auth, v.priv, v.pub, location.origin + '/'] });
+  S.sent = L.nextCounter(S.sent, Date.now());
+  await db.set('sent', S.sent);
+  S.outbox.push(await L.seal(S.keys.p2c, L.P2C, null, S.sent, msg));
+  await db.set('outbox', S.outbox);
+  S.pushSentEndpoint = j.endpoint; await db.set('pushSent', j.endpoint);
+  S.pushState = 'waiting';
+  drain();
+  return true;
+}
+/** Called from the button: the permission prompt must come first, straight from the tap. */
+function enablePush() {
+  S.pushError = '';
+  Notification.requestPermission().then(async perm => {
+    if (perm !== 'granted') { S.pushError = 'Notifiche non consentite. Per attivarle: Impostazioni › Notifiche › Tutela Genitore.'; render(); return; }
+    try {
+      const v = await vapid();
+      const reg = await navigator.serviceWorker.ready;
+      let sub = await reg.pushManager.getSubscription();
+      const key = sub && sub.options && sub.options.applicationServerKey ? L.b64(new Uint8Array(sub.options.applicationServerKey)) : null;
+      if (sub && key && key !== v.pub) { await sub.unsubscribe(); sub = null; }
+      if (!sub || S.pushState === 'expired') {
+        if (sub) await sub.unsubscribe();
+        sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: L.unb64(v.pub) });
+      }
+      S.subscribed = true;
+      if (!S.child) { S.pushError = 'Notifiche consentite: si attivano appena il telefono di tuo figlio è abbinato.'; render(); return; }
+      await sendPushSetup(sub, v);
+      toast('Notifiche attivate');
+    } catch (e) { S.pushError = 'Attivazione non riuscita (' + (e && e.name || 'errore') + '). Riprova.'; }
+    render();
+  });
+}
+/** Re-sends the setup when the child is new or the browser changed the endpoint. */
+async function resendPush(force) {
+  try {
+    const sub = await currentSubscription();
+    S.subscribed = !!sub;
+    if (!sub || !S.child) return;
+    if (force || sub.endpoint !== S.pushSentEndpoint) await sendPushSetup(sub, await vapid());
+  } catch { /* retried at the next opening */ }
+}
+
 async function newPairing() {
   const kp = await L.newKeyPair();
   const topic = L.newTopic();
-  let notifyTopic = L.newTopic();
-  while (notifyTopic === topic) notifyTopic = L.newTopic();
   const pub = await L.spki(kp.publicKey);
-  S.pair = { topic, notifyTopic, priv: kp.privateKey, pub, code: L.pairingCodeV2(topic, notifyTopic, pub), created: Date.now() };
-  S.child = null; S.keys = null; S.sent = 0; S.seenMax = 0; S.lastSeen = 0; S.outbox = []; S.loaded = false; S.showCode = true;
+  // v1 code: no separate ntfy notification topic any more, notifications come by Web Push (0.10.3).
+  S.pair = { topic, notifyTopic: null, priv: kp.privateKey, pub, code: L.pairingCode(topic, pub), created: Date.now() };
+  S.child = null; S.keys = null; S.pushState = null; S.pushSentEndpoint = null; S.sent = 0; S.seenMax = 0; S.lastSeen = 0; S.outbox = []; S.loaded = false; S.showCode = true;
   resetData();
   await db.set('pair', S.pair);
   S.archived = new Map();
-  for (const k of ['child', 'sent', 'seenMax', 'lastSeen', 'outbox', 'archived']) await db.del(k);
+  for (const k of ['child', 'sent', 'seenMax', 'lastSeen', 'outbox', 'archived', 'pushSent', 'pushState']) await db.del(k);
   disconnect(true);
 }
 
@@ -403,7 +476,7 @@ function homePage() {
     if (S.showArchived) for (const a of archived) out.push(alertCard(a, true));
   }
   out.push(h('div', { class: 'section' }, 'Notifiche'));
-  out.push(navRow('🔔', 'Notifiche su iPhone', 'Con l\'app gratuita ntfy: solo «apri l\'app», mai il contenuto', () => go('notify'), true));
+  out.push(navRow('🔔', 'Notifiche', pushLine(), () => go('notify'), true));
   out.push(h('div', { class: 'section' }, 'Sicurezza'));
   out.push(navRow('#', 'Cambia PIN', 'Serve il PIN attuale (già inserito)', () => go('pin')));
   out.push(navRow('🔒', 'Blocca ora', 'Chiede di nuovo il PIN', () => { S.unlocked = false; render(); }));
@@ -479,27 +552,40 @@ function pairPage() {
   return out;
 }
 
+function pushLine() {
+  if (!pushSupported()) return 'Non disponibili in questo browser';
+  if (!standalone()) return 'Aggiungi l\'app alla schermata Home per attivarle';
+  if (S.pushState === 'expired') return 'Da riattivare: tocca qui';
+  if (S.subscribed && S.pushState === 'ok') return 'Attive · solo «Nuovo avviso da Tutela: apri l\'app»';
+  if (S.subscribed && S.child) return 'In attesa del telefono di tuo figlio…';
+  return 'Spente: tocca qui per attivarle';
+}
 function notifyPage() {
-  const out = [header('Notifiche su iPhone', true),
-    h('p', { class: 'sub' }, 'Safari non può svegliare questa app da sola: usa l\'app gratuita ntfy, solo come campanello.')];
-  if (!S.pair) { out.push(h('p', { class: 'caption' }, 'Prima abbina il telefono di tuo figlio.')); return out; }
-  out.push(h('div', { class: 'card' },
-    h('ol', { class: 'steps' },
-      h('li', {}, 'Installa «ntfy» dall\'App Store (gratuita, nessun account).'),
-      h('li', {}, 'Tocca «Copia topic notifiche» qui sotto.'),
-      h('li', {}, 'In ntfy: + › incolla il topic › server ntfy.sh › Iscriviti.'),
-      h('li', {}, 'Quando arriva «Nuovo avviso da Tutela: apri l\'app», apri questa app e inserisci il PIN.')),
-    h('button', { class: 'btn primary', onclick: () => copy(S.pair.notifyTopic, 'Topic notifiche') }, 'Copia topic notifiche')));
-  out.push(h('div', { class: 'card' },
-    h('p', { class: 'card-head' }, 'Cosa vede ntfy'),
-    h('p', { class: 'caption' }, 'Solo il testo fisso «Nuovo avviso da Tutela: apri l\'app» e l\'ora. Il topic notifiche è casuale e diverso da quello degli avvisi: non contiene nomi, testi, categorie né chiavi. Viene inviato solo per un nuovo avviso, l\'apertura di una segnalazione o la protezione interrotta.')));
-  out.push(h('div', { class: 'card' },
-    h('p', { class: 'card-head' }, 'Metti l\'app nella schermata Home'),
-    h('p', { class: 'caption' }, 'In Safari: Condividi › Aggiungi alla schermata Home. Si apre a tutto schermo e funziona anche senza rete (gli avvisi nuovi servono la rete).')));
-  if ('Notification' in window && Notification.permission === 'default') {
-    out.push(h('button', { class: 'btn ghost', onclick: async () => { await Notification.requestPermission(); render(); } },
-      'Notifiche anche da questa app (solo mentre è aperta)'));
+  const out = [header('Notifiche', true),
+    h('p', { class: 'sub' }, 'Il telefono di tuo figlio fa suonare questo iPhone. La notifica dice solo «Nuovo avviso da Tutela: apri l\'app»: il contenuto lo vedi solo qui, con il PIN.')];
+  if (!pushSupported() || !standalone()) {
+    out.push(h('div', { class: 'card' },
+      h('p', { class: 'card-head' }, 'Prima aggiungi l\'app alla schermata Home'),
+      h('ol', { class: 'steps' },
+        h('li', {}, 'Apri questa pagina in Safari.'),
+        h('li', {}, 'Tocca Condividi (il quadrato con la freccia) › «Aggiungi alla schermata Home».'),
+        h('li', {}, 'Apri Tutela Genitore dall\'icona sulla Home e torna qui: comparirà «Attiva notifiche».')),
+      h('p', { class: 'caption' }, 'Su iPhone le notifiche delle app web funzionano solo così (iOS 16.4 o successivo).')));
+    return out;
   }
+  const state = S.pushState === 'expired' ? 'Notifiche da riattivare: il permesso è scaduto o è stato tolto.'
+    : S.subscribed && S.pushState === 'ok' ? 'Notifiche attive. Il telefono di tuo figlio ha confermato.'
+    : S.subscribed && S.child ? 'Permesso dato. In attesa della conferma del telefono di tuo figlio (entro circa 30 secondi).'
+    : 'Notifiche spente.';
+  out.push(h('div', { class: 'card' },
+    h('p', { class: 'card-head' }, state),
+    S.pushError ? h('p', { class: 'err' }, S.pushError) : null,
+    (!S.subscribed || S.pushState === 'expired' || !S.pushState)
+      ? h('button', { class: 'btn primary', onclick: enablePush }, S.pushState === 'expired' ? 'Riattiva notifiche' : 'Attiva notifiche')
+      : h('button', { class: 'btn ghost', onclick: () => { resendPush(true); toast('Richiesta inviata'); render(); } }, 'Invia di nuovo al telefono di tuo figlio')));
+  out.push(h('div', { class: 'card' },
+    h('p', { class: 'card-head' }, 'Privacy'),
+    h('p', { class: 'caption' }, 'Nessun server nostro e nessun account. Il servizio notifiche di Apple riceve solo una notifica cifrata con un testo fisso, senza nomi, chat o categorie. L\'indirizzo delle notifiche passa al telefono di tuo figlio solo cifrato.')));
   return out;
 }
 
@@ -526,10 +612,13 @@ window.addEventListener('online', () => { drain(); if (!streamCtrl) connect(); }
     S.lastSeen = S.lastSeenSaved = await db.get('lastSeen') || 0;
     S.outbox = await db.get('outbox') || [];
     S.archived = new Map(await db.get('archived') || []);
+    S.pushSentEndpoint = await db.get('pushSent') || null;
+    S.pushState = await db.get('pushState') || null;
   } catch {
     document.getElementById('app').replaceChildren(h('p', { class: 'caption center' }, 'Memoria del browser non disponibile (navigazione privata?).'));
     return;
   }
   render();
   if (S.outbox.length) drain();
+  if (pushSupported() && standalone()) { vapid().catch(() => {}); resendPush(false).then(scheduleRender); }
 })();

@@ -8,7 +8,8 @@ const subtle = globalThis.crypto.subtle;
 
 export const CODE_PREFIX = 'TG1.', WIRE_PREFIX = 'T1.';
 export const C2P = 1, P2C = 2, WIRE_VERSION = 1, TOPIC_LENGTH = 32;
-export const TYPES = ['ALERT', 'CASE_OPEN', 'CASE_FRAGMENTS', 'STATUS', 'CLOSE_CASE'];
+export const TYPES = ['ALERT', 'CASE_OPEN', 'CASE_FRAGMENTS', 'STATUS', 'CLOSE_CASE', 'PUSH'];
+export const PUSH_ACTIVE = 1, PUSH_EXPIRED = 2;
 export const STATES = ['ACTIVE', 'INTERRUPTED', 'RESUMED', 'STOPPED', 'PAIRED'];
 export const LEVEL_HIGH = 1, OUTCOME_OK = 1, OUTCOME_INTERVENE = 2;
 const B32 = 'abcdefghijklmnopqrstuvwxyz234567';
@@ -53,6 +54,10 @@ export function importPublic(spkiBytes) {
   return subtle.importKey('spki', spkiBytes, { name: 'ECDH', namedCurve: 'P-256' }, true, []);
 }
 
+/** Code v1: version 1 | topic | parent's public key. Used by the web app since 0.10.3 (notifications via Web Push). */
+export function pairingCode(topic, parentSpki) {
+  return CODE_PREFIX + b64(concat(new Uint8Array([1]), enc.encode(topic), parentSpki));
+}
 /** Code v2: version 2 | topic | notification topic | parent's public key (SPKI = Java X.509). */
 export function pairingCodeV2(topic, notifyTopic, parentSpki) {
   return CODE_PREFIX + b64(concat(new Uint8Array([2]), enc.encode(topic), enc.encode(notifyTopic), parentSpki));

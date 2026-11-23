@@ -1,5 +1,5 @@
 // Offline app shell only. Never caches ntfy.sh (alerts are rebuilt from the ciphertext at each opening).
-const CACHE = 'tutela-genitore-0.10.2-1';
+const CACHE = 'tutela-genitore-0.10.3';
 const SHELL = ['./', 'index.html', 'style.css', 'app.js', 'link.js', 'manifest.json',
   'icons/icon.svg', 'icons/shield.svg', 'icons/icon-192.png', 'icons/icon-512.png', 'icons/apple-touch-icon.png'];
 
@@ -18,6 +18,16 @@ self.addEventListener('fetch', e => {
     if (r.ok) { const copy = r.clone(); caches.open(CACHE).then(c => c.put(e.request, copy)); }
     return r;
   }).catch(() => caches.match(e.request, { ignoreSearch: true }).then(r => r || caches.match('index.html'))));
+});
+// Web Push from the child's phone: only a fixed text (encrypted by the sender, decrypted by the browser).
+const PUSH_TEXTS = ["Nuovo avviso da Tutela: apri l'app", 'Tutela: notifiche attive'];
+self.addEventListener('push', e => {
+  let body = PUSH_TEXTS[0];
+  try { const t = e.data && e.data.text(); if (PUSH_TEXTS.includes(t)) body = t; } catch { /* keep the fixed text */ }
+  e.waitUntil(Promise.all([
+    self.registration.showNotification('Tutela Genitore', { body, tag: 'tutela', icon: 'icons/icon-192.png' }),
+    self.navigator.setAppBadge ? self.navigator.setAppBadge().catch(() => {}) : Promise.resolve(),
+  ]));
 });
 self.addEventListener('notificationclick', e => {
   e.notification.close();
