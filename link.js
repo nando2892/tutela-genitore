@@ -1,4 +1,4 @@
-// Tutela Genitore (web) — protocol 0.10 of the child app, in WebCrypto. Mirrors SecureLink.java and
+// Phylax Genitore (web) — protocol 0.10 of the child app, in WebCrypto. Mirrors SecureLink.java and
 // LinkMessage.java byte for byte (cross-checked against the Java code). No libraries, no CDN.
 // ECDH P-256 -> HKDF-SHA256 -> AES-256-GCM per direction, 12-byte random nonce, counter against replays.
 
@@ -99,7 +99,7 @@ export async function derive(myPrivate, theirPublic, topic) {
 }
 
 export function peek(wire) {
-  if (typeof wire !== 'string' || !wire.startsWith(WIRE_PREFIX)) throw new Error('Non è un messaggio Tutela');
+  if (typeof wire !== 'string' || !wire.startsWith(WIRE_PREFIX)) throw new Error('Non è un messaggio Phylax');
   const raw = unb64(wire.slice(WIRE_PREFIX.length));
   const dv = new DataView(raw.buffer, raw.byteOffset, raw.byteLength);
   if (raw[0] !== WIRE_VERSION) throw new Error('Versione non supportata');

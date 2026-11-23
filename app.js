@@ -1,11 +1,11 @@
-// Tutela Genitore — web app (PWA) for the parent's iPhone. Same protocol and look as the Android app.
+// Phylax Genitore — web app (PWA) for the parent's iPhone. Same protocol and look as the Android app.
 // Stores on this device ONLY: the key pair (private key not extractable), topics, counters, PIN hash,
 // last contact time. Alerts and reports are NOT stored: at every opening they are rebuilt by decrypting what
 // ntfy.sh still keeps (about 12 hours, ciphertext only), including our own "close" messages.
 import * as L from './link.js';
 import * as Bio from './bio.js';
 
-const VERSION = '0.10.4';
+const VERSION = '0.11';
 const SILENT_MS = 60 * 60 * 1000;            // like LinkPolicy: warning after 1 hour without messages
 const MAX_AGE_S = 24 * 60 * 60;              // reject messages published > 24 h after they were written (replays)
 const LOCK_AFTER_MS = 5 * 60 * 1000;         // PIN again after 5 minutes in the background
@@ -226,7 +226,7 @@ function announce(what, m) {
   try { navigator.setAppBadge && navigator.setAppBadge(); } catch { /* not supported */ }
   // Content-free system notification (like the Android lock screen): details only inside the app, after the PIN.
   if ('Notification' in window && Notification.permission === 'granted' && document.visibilityState !== 'visible') {
-    navigator.serviceWorker?.ready.then(reg => reg.showNotification('Tutela Genitore', { body: text, tag: 'tutela', icon: 'icons/icon-192.png' })).catch(() => {});
+    navigator.serviceWorker?.ready.then(reg => reg.showNotification('Phylax Genitore', { body: text, tag: 'tutela', icon: 'icons/icon-192.png' })).catch(() => {});
   }
 }
 
@@ -327,7 +327,7 @@ async function sendPushSetup(sub, v) {
 function enablePush() {
   S.pushError = '';
   Notification.requestPermission().then(async perm => {
-    if (perm !== 'granted') { S.pushError = 'Notifiche non consentite. Per attivarle: Impostazioni › Notifiche › Tutela Genitore.'; render(); return; }
+    if (perm !== 'granted') { S.pushError = 'Notifiche non consentite. Per attivarle: Impostazioni › Notifiche › Phylax Genitore.'; render(); return; }
     try {
       const v = await vapid();
       const reg = await navigator.serviceWorker.ready;
@@ -377,7 +377,7 @@ function scheduleRender() {
   renderPending = true;
   requestAnimationFrame(() => { renderPending = false; render(); });
 }
-const shield = () => h('img', { class: 'logo', src: 'icons/shield.svg', alt: '' });
+const shield = () => h('img', { class: 'logo', src: 'icons/mark.svg', alt: '' }); // Phylax mark (arc + dot)
 function header(title, back) {
   return h('div', { class: 'head' },
     back ? h('button', { class: 'back', 'aria-label': 'Indietro', onclick: () => go('') }, '‹') : shield(),
@@ -395,7 +395,7 @@ function render() {
 function pageKey(r) { return !S.pin ? 'setpin' : !S.unlocked ? 'lock' : r.split('/')[0] || 'home'; }
 function page(r) {
   if (!S.pin) return pinPage('Scegli un PIN', 'Protegge gli avvisi su questo telefono. Almeno 6 cifre.', true);
-  if (!S.unlocked) return pinPage('Tutela Genitore', 'Inserisci il PIN.', false);
+  if (!S.unlocked) return pinPage('Phylax Genitore', 'Inserisci il PIN.', false);
   const [name, arg] = r.split('/');
   if (name === 'report') return reportPage(Number(arg));
   if (name === 'pair') return pairPage();
@@ -497,7 +497,7 @@ function statusCard() {
   const now = Date.now();
   let cls = '', title, line, action = 'Abbinamento e codice di verifica';
   if (!S.pair) { title = 'Non abbinato'; line = 'Abbina il telefono di tuo figlio con un codice.'; action = 'Abbina'; }
-  else if (!S.child) { title = 'In attesa del telefono di tuo figlio'; line = 'Incolla il codice in Tutela sul suo telefono › Telefono del genitore.'; }
+  else if (!S.child) { title = 'In attesa del telefono di tuo figlio'; line = 'Incolla il codice in Phylax sul suo telefono › Telefono del genitore.'; }
   else if (S.loaded && now - S.lastSeen > SILENT_MS) { cls = 'broken'; title = 'Non risponde da più di 1 ora'; line = 'Può essere spento, senza rete, o l\'app è stata fermata o disinstallata.'; }
   else if (!S.state) { title = 'Abbinato'; line = S.loaded ? 'Nessun messaggio nelle ultime ore.' : 'Lettura degli avvisi cifrati…'; }
   else {
@@ -512,7 +512,7 @@ function statusCard() {
 }
 
 function homePage() {
-  const out = [header('Tutela Genitore'), h('p', { class: 'sub' }, 'Avvisi cifrati dal telefono di tuo figlio.'), statusCard()];
+  const out = [header('Phylax Genitore'), h('p', { class: 'sub' }, 'Avvisi cifrati dal telefono di tuo figlio.'), statusCard()];
   if (S.pair) {
     out.push(h('p', { class: 'caption' }, h('span', { class: 'dot' + (S.online ? ' on' : '') }),
       S.online ? 'In ascolto (ntfy.sh, solo testo cifrato)' : 'Non collegato: riconnessione…', S.error ? ' · ' + S.error : ''));
@@ -585,7 +585,7 @@ function pairPage() {
     out.push(h('div', { class: 'card' },
       h('ol', { class: 'steps' },
         h('li', {}, 'Tocca «Crea codice di abbinamento» e poi «Copia».'),
-        h('li', {}, 'Mandalo sul telefono di tuo figlio (o scrivilo): Tutela › Telefono del genitore › PIN genitore › incolla › Abbina.'),
+        h('li', {}, 'Mandalo sul telefono di tuo figlio (o scrivilo): Phylax › Telefono del genitore › PIN genitore › incolla › Abbina.'),
         h('li', {}, 'Confrontate il codice di verifica a 6 cifre: deve essere uguale sui due telefoni.')),
       h('button', { class: 'btn primary', onclick: async e => { e.target.disabled = true; await newPairing(); render(); } }, 'Crea codice di abbinamento')));
     return out;
@@ -607,7 +607,7 @@ function pairPage() {
     h('button', { class: 'btn primary', onclick: () => copy(S.pair.code, 'Codice') }, 'Copia'),
     h('button', { class: 'btn ghost', onclick: () => { S.showCode = !S.showCode; render(); } }, S.showCode ? 'Nascondi codice' : 'Mostra codice'),
     S.child ? null : h('ol', { class: 'steps' },
-      h('li', {}, 'Sul telefono di tuo figlio: Tutela › Telefono del genitore › PIN genitore.'),
+      h('li', {}, 'Sul telefono di tuo figlio: Phylax › Telefono del genitore › PIN genitore.'),
       h('li', {}, 'Incolla il codice e tocca Abbina.'),
       h('li', {}, 'Qui comparirà il codice di verifica a 6 cifre.'))));
   out.push(h('button', { class: 'btn danger', onclick: async () => {
@@ -621,20 +621,20 @@ function pushLine() {
   if (!pushSupported()) return 'Non disponibili in questo browser';
   if (!standalone()) return 'Aggiungi l\'app alla schermata Home per attivarle';
   if (S.pushState === 'expired') return 'Da riattivare: tocca qui';
-  if (S.subscribed && S.pushState === 'ok') return 'Attive · solo «Nuovo avviso da Tutela: apri l\'app»';
+  if (S.subscribed && S.pushState === 'ok') return 'Attive · solo «Nuovo avviso da Phylax: apri l\'app»';
   if (S.subscribed && S.child) return 'In attesa del telefono di tuo figlio…';
   return 'Spente: tocca qui per attivarle';
 }
 function notifyPage() {
   const out = [header('Notifiche', true),
-    h('p', { class: 'sub' }, 'Il telefono di tuo figlio fa suonare questo iPhone. La notifica dice solo «Nuovo avviso da Tutela: apri l\'app»: il contenuto lo vedi solo qui, con il PIN.')];
+    h('p', { class: 'sub' }, 'Il telefono di tuo figlio fa suonare questo iPhone. La notifica dice solo «Nuovo avviso da Phylax: apri l\'app»: il contenuto lo vedi solo qui, con il PIN.')];
   if (!pushSupported() || !standalone()) {
     out.push(h('div', { class: 'card' },
       h('p', { class: 'card-head' }, 'Prima aggiungi l\'app alla schermata Home'),
       h('ol', { class: 'steps' },
         h('li', {}, 'Apri questa pagina in Safari.'),
         h('li', {}, 'Tocca Condividi (il quadrato con la freccia) › «Aggiungi alla schermata Home».'),
-        h('li', {}, 'Apri Tutela Genitore dall\'icona sulla Home e torna qui: comparirà «Attiva notifiche».')),
+        h('li', {}, 'Apri Phylax Genitore dall\'icona sulla Home e torna qui: comparirà «Attiva notifiche».')),
       h('p', { class: 'caption' }, 'Su iPhone le notifiche delle app web funzionano solo così (iOS 16.4 o successivo).')));
     return out;
   }

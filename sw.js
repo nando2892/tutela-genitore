@@ -1,7 +1,7 @@
 // Offline app shell only. Never caches ntfy.sh (alerts are rebuilt from the ciphertext at each opening).
-const CACHE = 'tutela-genitore-0.10.4';
+const CACHE = 'phylax-genitore-0.11';
 const SHELL = ['./', 'index.html', 'style.css', 'app.js', 'link.js', 'bio.js', 'manifest.json',
-  'icons/icon.svg', 'icons/shield.svg', 'icons/icon-192.png', 'icons/icon-512.png', 'icons/apple-touch-icon.png'];
+  'icons/icon.svg', 'icons/mark.svg', 'icons/icon-192.png', 'icons/icon-512.png', 'icons/maskable-192.png', 'icons/maskable-512.png', 'icons/apple-touch-icon.png'];
 
 self.addEventListener('install', e => {
   e.waitUntil(caches.open(CACHE).then(c => c.addAll(SHELL.map(u => new Request(u, { cache: 'reload' })))).then(() => self.skipWaiting()));
@@ -20,12 +20,13 @@ self.addEventListener('fetch', e => {
   }).catch(() => caches.match(e.request, { ignoreSearch: true }).then(r => r || caches.match('index.html'))));
 });
 // Web Push from the child's phone: only a fixed text (encrypted by the sender, decrypted by the browser).
-const PUSH_TEXTS = ["Nuovo avviso da Tutela: apri l'app", 'Tutela: notifiche attive'];
+// First text = default. The old Tutela texts stay accepted while a child phone still runs 0.10.x.
+const PUSH_TEXTS = ["Nuovo avviso da Phylax: apri l'app", 'Phylax: notifiche attive', "Nuovo avviso da Tutela: apri l'app", 'Tutela: notifiche attive'];
 self.addEventListener('push', e => {
   let body = PUSH_TEXTS[0];
   try { const t = e.data && e.data.text(); if (PUSH_TEXTS.includes(t)) body = t; } catch { /* keep the fixed text */ }
   e.waitUntil(Promise.all([
-    self.registration.showNotification('Tutela Genitore', { body, tag: 'tutela', icon: 'icons/icon-192.png' }),
+    self.registration.showNotification('Phylax Genitore', { body, tag: 'tutela', icon: 'icons/icon-192.png' }),
     self.navigator.setAppBadge ? self.navigator.setAppBadge().catch(() => {}) : Promise.resolve(),
   ]));
 });

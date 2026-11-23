@@ -18,8 +18,8 @@ export async function available() {
 export async function register(rpId, origin) {
   const challenge = crypto.getRandomValues(new Uint8Array(32));
   const cred = await navigator.credentials.create({ publicKey: {
-    rp: { id: rpId, name: 'Tutela Genitore' },
-    user: { id: crypto.getRandomValues(new Uint8Array(16)), name: 'Tutela Genitore', displayName: 'Genitore' },
+    rp: { id: rpId, name: 'Phylax Genitore' },
+    user: { id: crypto.getRandomValues(new Uint8Array(16)), name: 'Phylax Genitore', displayName: 'Genitore' },
     challenge,
     pubKeyCredParams: [{ type: 'public-key', alg: -7 }],
     authenticatorSelection: { authenticatorAttachment: 'platform', userVerification: 'required', residentKey: 'discouraged', requireResidentKey: false },
