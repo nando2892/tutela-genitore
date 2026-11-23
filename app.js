@@ -5,7 +5,7 @@
 import * as L from './link.js';
 import * as Bio from './bio.js';
 
-const VERSION = '0.11';
+const VERSION = '0.11.1';
 const SILENT_MS = 60 * 60 * 1000;            // like LinkPolicy: warning after 1 hour without messages
 const MAX_AGE_S = 24 * 60 * 60;              // reject messages published > 24 h after they were written (replays)
 const LOCK_AFTER_MS = 5 * 60 * 1000;         // PIN again after 5 minutes in the background
@@ -377,7 +377,7 @@ function scheduleRender() {
   renderPending = true;
   requestAnimationFrame(() => { renderPending = false; render(); });
 }
-const shield = () => h('img', { class: 'logo', src: 'icons/mark.svg', alt: '' }); // Phylax mark (arc + dot)
+const shield = () => h('img', { class: 'logo', src: 'icons/shield.svg', alt: '' });
 function header(title, back) {
   return h('div', { class: 'head' },
     back ? h('button', { class: 'back', 'aria-label': 'Indietro', onclick: () => go('') }, '‹') : shield(),
