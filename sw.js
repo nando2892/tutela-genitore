@@ -1,5 +1,5 @@
 // Offline app shell only. Never caches ntfy.sh (alerts are rebuilt from the ciphertext at each opening).
-const CACHE = 'tutela-genitore-0.10.1';
+const CACHE = 'tutela-genitore-0.10.2';
 const SHELL = ['./', 'index.html', 'style.css', 'app.js', 'link.js', 'manifest.json',
   'icons/icon.svg', 'icons/shield.svg', 'icons/icon-192.png', 'icons/icon-512.png', 'icons/apple-touch-icon.png'];
 

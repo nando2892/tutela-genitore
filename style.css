@@ -98,3 +98,6 @@ main { max-width: 520px; margin: 0 auto; padding: 24px 16px 40px; }
 .card-title { font-size: 19px; font-weight: 500; margin: 0 0 4px; }
 .card-head { margin: 0 0 8px; }
 .gap { height: 12px; }
+.link { background: none; border: 0; padding: 12px 0 0; color: var(--primary); font: inherit; font-weight: 600; cursor: pointer; }
+.toggle { display: block; width: 100%; background: none; border: 0; text-align: left; padding: 6px 0 12px; color: var(--muted); font: inherit; font-size: 15px; cursor: pointer; }
+.card.archived { opacity: 0.75; }

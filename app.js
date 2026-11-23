@@ -4,12 +4,13 @@
 // ntfy.sh still keeps (about 12 hours, ciphertext only), including our own "close" messages.
 import * as L from './link.js';
 
-const VERSION = '0.10.1';
+const VERSION = '0.10.2';
 const SILENT_MS = 60 * 60 * 1000;            // like LinkPolicy: warning after 1 hour without messages
 const MAX_AGE_S = 24 * 60 * 60;              // reject messages published > 24 h after they were written (replays)
 const LOCK_AFTER_MS = 5 * 60 * 1000;         // PIN again after 5 minutes in the background
 const PBKDF2_ITERATIONS = 310000;
-const MAX_ALERTS = 100, MAX_FRAGMENTS = 200;
+const MAX_ALERTS = 100, MAX_FRAGMENTS = 200, MAX_ARCHIVED_KEYS = 300;
+const LINK_WINDOW_MS = 2 * 60 * 1000;        // an alert within 2 minutes of a report's opening belongs to it
 
 // ---------- IndexedDB (key/value) ----------
 const db = (() => {
@@ -45,7 +46,7 @@ const S = {
   alerts: [], reports: new Map(), state: null, detail: '', lastSeen: 0, lastStatus: 0,
   lastId: 'all', lastC2P: 0, lastP2C: 0,
   online: false, loaded: false, error: '', outbox: [], outboxWait: 5000,
-  showCode: true,
+  showCode: true, archived: new Map(), showArchived: false,
 };
 let streamCtrl = null, reconnectTimer = null, lastActivity = 0, queue = Promise.resolve();
 
@@ -104,6 +105,32 @@ async function checkPin(pin) {
 }
 
 // ---------- Received data (same rules as ParentStore.java) ----------
+// ---------- Archive (local only: a key per alert in IndexedDB, nothing is sent) ----------
+const norm = t => (t || '').toLowerCase().replace(/\[tutela-test\]/g, '').replace(/\s+/g, ' ').trim();
+function alertKey(a) {
+  let x = 0;
+  for (const ch of a.category + '|' + a.text) x = (x * 31 + ch.codePointAt(0)) >>> 0;
+  return a.time + ':' + x.toString(36);
+}
+/** Same rule as ParentStore.linked: near the report's opening, or its text is one of the report's messages. */
+function linked(a, r) {
+  if (Math.abs(a.time - r.opened) <= LINK_WINDOW_MS) return true;
+  const t = norm(a.text);
+  return r.fragments.some(f => { const x = norm(f.text); return x.length > 0 && (t.includes(x) || x.includes(t)); });
+}
+function setArchived(a, on) {
+  a.archived = on;
+  const k = alertKey(a);
+  S.archived.delete(k); S.archived.set(k, on); // false = put back by the parent: a re-read closure won't archive it again
+  while (S.archived.size > MAX_ARCHIVED_KEYS) S.archived.delete(S.archived.keys().next().value);
+  db.set('archived', [...S.archived]).catch(() => {});
+}
+function closeLocally(id) {
+  const r = S.reports.get(id);
+  if (r) for (const a of S.alerts) if (!a.archived && S.archived.get(alertKey(a)) !== false && linked(a, r)) setArchived(a, true);
+  S.reports.delete(id);
+}
+
 function resetData() {
   S.alerts = []; S.reports = new Map(); S.state = null; S.detail = ''; S.lastStatus = 0;
   S.lastId = 'all'; S.lastC2P = 0; S.lastP2C = 0;
@@ -113,6 +140,7 @@ function apply(m, receivedAt) {
   switch (m.type) {
     case 'ALERT':
       S.alerts.unshift({ high: m.level === L.LEVEL_HIGH, category: m.category, app: m.app, text: m.text, time: m.time });
+      S.alerts[0].archived = S.archived.get(alertKey(S.alerts[0])) === true;
       S.alerts.length = Math.min(S.alerts.length, MAX_ALERTS);
       return 'ALERT';
     case 'CASE_OPEN':
@@ -174,7 +202,7 @@ async function handle(ev, live) {
       const { header, plaintext } = await L.open(S.keys.p2c, L.P2C, ev.message, S.lastP2C);
       S.lastP2C = header.counter;
       const m = L.decodeMessage(plaintext);
-      if (m.type === 'CLOSE_CASE') S.reports.delete(m.caseId);
+      if (m.type === 'CLOSE_CASE') closeLocally(m.caseId);
     }
   } catch { /* not ours, altered or replayed */ }
   scheduleRender();
@@ -228,7 +256,7 @@ async function closeReport(id, outcome) {
   S.sent = L.nextCounter(S.sent, Date.now());
   await db.set('sent', S.sent);
   const wire = await L.seal(S.keys.p2c, L.P2C, null, S.sent, L.closeMessage(Date.now(), id, outcome));
-  S.reports.delete(id);
+  closeLocally(id);
   S.outbox.push(wire);
   await db.set('outbox', S.outbox);
   drain();
@@ -261,7 +289,8 @@ async function newPairing() {
   S.child = null; S.keys = null; S.sent = 0; S.seenMax = 0; S.lastSeen = 0; S.outbox = []; S.loaded = false; S.showCode = true;
   resetData();
   await db.set('pair', S.pair);
-  for (const k of ['child', 'sent', 'seenMax', 'lastSeen', 'outbox']) await db.del(k);
+  S.archived = new Map();
+  for (const k of ['child', 'sent', 'seenMax', 'lastSeen', 'outbox', 'archived']) await db.del(k);
   disconnect(true);
 }
 
@@ -365,12 +394,13 @@ function homePage() {
       h('div', { class: 'chev' }, '›')));
   }
   out.push(h('div', { class: 'section' }, 'Avvisi'));
-  if (!S.alerts.length) out.push(h('div', { class: 'card empty' }, h('b', {}, 'Nessun avviso.'), 'Gli avvisi arrivano cifrati; questa app non li salva sul telefono.'));
-  for (const a of S.alerts) {
-    out.push(h('div', { class: 'card alert' },
-      h('div', { class: 'alert-top' }, h('span', { class: 'chip ' + (a.high ? 'danger' : 'warning') }, a.high ? 'Rischio alto' : 'Da verificare'),
-        h('span', { class: 'time' }, hm(a.time))),
-      h('h3', {}, a.category), h('p', { class: 'meta' }, a.app), h('div', { class: 'quote' }, a.text)));
+  const active = S.alerts.filter(a => !a.archived), archived = S.alerts.filter(a => a.archived);
+  if (!active.length) out.push(h('div', { class: 'card empty' }, h('b', {}, 'Nessun avviso.'), 'Gli avvisi arrivano cifrati; questa app non li salva sul telefono.'));
+  for (const a of active) out.push(alertCard(a, false));
+  if (archived.length) {
+    out.push(h('button', { class: 'toggle', 'aria-expanded': String(S.showArchived), onclick: () => { S.showArchived = !S.showArchived; render(); } },
+      'Archiviati (' + archived.length + ') ' + (S.showArchived ? '▴' : '▾')));
+    if (S.showArchived) for (const a of archived) out.push(alertCard(a, true));
   }
   out.push(h('div', { class: 'section' }, 'Notifiche'));
   out.push(navRow('🔔', 'Notifiche su iPhone', 'Con l\'app gratuita ntfy: solo «apri l\'app», mai il contenuto', () => go('notify'), true));
@@ -380,6 +410,14 @@ function homePage() {
   out.push(h('p', { class: 'caption center' }, 'Versione web ' + VERSION + ' · consegna tramite ntfy.sh (gratuito, solo testo cifrato) · '
     + 'gli avvisi restano cifrati sul server per circa 12 ore e non vengono salvati qui · solo prove con messaggi inventati [TUTELA-TEST]'));
   return out;
+}
+function alertCard(a, archived) {
+  return h('div', { class: 'card alert' + (archived ? ' archived' : '') },
+    h('div', { class: 'alert-top' }, h('span', { class: 'chip ' + (a.high ? 'danger' : 'warning') }, a.high ? 'Rischio alto' : 'Da verificare'),
+      h('span', { class: 'time' }, hm(a.time))),
+    h('h3', {}, a.category), h('p', { class: 'meta' }, a.app), h('div', { class: 'quote' }, a.text),
+    h('button', { class: 'link', onclick: () => { setArchived(a, !archived); toast(archived ? 'Rimesso tra gli avvisi' : 'Avviso archiviato'); render(); } },
+      archived ? 'Rimetti tra gli avvisi' : 'Archivia'));
 }
 function navRow(icon, title, sub, onclick, indigo) {
   return h('div', { class: 'card row', role: 'button', tabindex: '0', onclick },
@@ -487,6 +525,7 @@ window.addEventListener('online', () => { drain(); if (!streamCtrl) connect(); }
     S.seenMax = await db.get('seenMax') || 0;
     S.lastSeen = S.lastSeenSaved = await db.get('lastSeen') || 0;
     S.outbox = await db.get('outbox') || [];
+    S.archived = new Map(await db.get('archived') || []);
   } catch {
     document.getElementById('app').replaceChildren(h('p', { class: 'caption center' }, 'Memoria del browser non disponibile (navigazione privata?).'));
     return;
