@@ -9,8 +9,10 @@ const subtle = globalThis.crypto.subtle;
 export const CODE_PREFIX = 'TG1.', WIRE_PREFIX = 'T1.';
 export const C2P = 1, P2C = 2, WIRE_VERSION = 1, TOPIC_LENGTH = 32;
 // 0.22: USAGE (child: minutes per app), RULES (parent: screen-time rules), EXTRA (more time: asked / granted / refused).
-export const TYPES = ['ALERT', 'CASE_OPEN', 'CASE_FRAGMENTS', 'STATUS', 'CLOSE_CASE', 'PUSH', 'USAGE', 'RULES', 'EXTRA'];
+export const TYPES = ['ALERT', 'CASE_OPEN', 'CASE_FRAGMENTS', 'STATUS', 'CLOSE_CASE', 'PUSH', 'USAGE', 'RULES', 'EXTRA', 'LOCATION'];
 export const EXTRA_ASK = 0, EXTRA_YES = 1, EXTRA_NO = 2;
+/** 0.24 LOCATION: parent asks (LOC_ASK), child answers once (LOC_HERE «lat,lon,metri,ora» / LOC_NONE why) or a safe place event. */
+export const LOC_ASK = 0, LOC_HERE = 1, LOC_NONE = 2, LOC_PLACE = 3;
 export const PUSH_ACTIVE = 1, PUSH_EXPIRED = 2;
 export const STATES = ['ACTIVE', 'INTERRUPTED', 'RESUMED', 'STOPPED', 'PAIRED'];
 export const LEVEL_HIGH = 1, LEVEL_DOUBT = 2, OUTCOME_OK = 1, OUTCOME_INTERVENE = 2;
@@ -188,10 +190,25 @@ export function rulesLines(r) {
   for (const [c] of SITE_CATEGORIES) if ((r.sites || []).includes(c)) out.push('site|' + c);
   for (const d of r.allow || []) out.push('allow|' + d);
   for (const d of r.deny || []) out.push('deny|' + d);
+  for (const p of r.places || []) out.push('place|' + p.lat.toFixed(5) + '|' + p.lon.toFixed(5) + '|' + p.radius + '|' + p.name);
   return out;
 }
+/** 0.24: same checks as ScreenRules.setPlace. Returns the cleaned place or null. */
+export function makePlace(name, lat, lon, radius) {
+  let n = String(name || '').replace(/\|/g, ' ').trim().slice(0, 40).trim().slice(0, 30);
+  lat = Number(lat); lon = Number(lon); radius = Number(radius);
+  if (!n || !Number.isFinite(lat) || !Number.isFinite(lon) || Math.abs(lat) > 90 || Math.abs(lon) > 180 || !Number.isFinite(radius)) return null;
+  return { name: n, lat: Math.round(lat * 1e5) / 1e5, lon: Math.round(lon * 1e5) / 1e5, radius: Math.max(100, Math.min(1000, Math.round(radius))) };
+}
+/** Adds or replaces by name (at most 10 places). */
+export function setPlace(list, p) {
+  if (!p) return list;
+  const has = list.some(x => x.name === p.name);
+  if (!has && list.length >= 10) return list;
+  return has ? list.map(x => x.name === p.name ? p : x) : [...list, p];
+}
 export function parseRules(version, lines) {
-  const r = { version, night: null, limits: [], sites: [], allow: [], deny: [] };
+  const r = { version, night: null, limits: [], sites: [], allow: [], deny: [], places: [] };
   for (const line of lines || []) {
     const f = line.split('|');
     if (f[0] === 'night' && f.length >= 3) {
@@ -200,6 +217,8 @@ export function parseRules(version, lines) {
     } else if (f[0] === 'limit' && f.length >= 3 && f[1] && r.limits.length < 60) {
       const m = parseInt(f[2], 10);
       if (m >= 0) r.limits.push({ pkg: f[1], label: f.slice(3).join('|') || f[1], minutes: Math.min(m, 1440) });
+    } else if (f[0] === 'place' && f.length >= 5) {
+      r.places = setPlace(r.places, makePlace(f.slice(4).join('|'), f[1], f[2], parseInt(f[3], 10)));
     } else if (f[0] === 'site' && SITE_CATEGORIES.some(([c]) => c === f[1]) && !r.sites.includes(f[1])) r.sites.push(f[1]);
     else if ((f[0] === 'allow' || f[0] === 'deny') && siteHost(f[1])) {
       const d = siteHost(f[1]);
@@ -224,6 +243,15 @@ export function siteHost(typed) {
 export function rulesMessage(time, r) { return encodeMessage({ type: 'RULES', time, caseId: r.version, fragments: rulesLines(r) }); }
 export function extraMessage(time, pkg, label, minutes, outcome) {
   return encodeMessage({ type: 'EXTRA', time, text: pkg, app: label, caseId: minutes, outcome });
+}
+export function locateMessage(time, request) { return encodeMessage({ type: 'LOCATION', time, caseId: request, outcome: LOC_ASK }); }
+/** LOC_HERE text -> { lat, lon, meters, fixTime } or null. */
+export function parseWhere(text) {
+  const f = String(text || '').split(',');
+  if (f.length !== 4) return null;
+  const lat = Number(f[0]), lon = Number(f[1]), meters = parseInt(f[2], 10), fixTime = Number(f[3]);
+  if (!Number.isFinite(lat) || !Number.isFinite(lon) || Math.abs(lat) > 90 || Math.abs(lon) > 180 || !Number.isFinite(fixTime)) return null;
+  return { lat, lon, meters: meters || 0, fixTime };
 }
 /** USAGE fragments «label|minutes|package» -> [{ label, minutes, pkg }]. */
 export function parseUsage(fragments) {

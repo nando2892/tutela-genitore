@@ -8,7 +8,7 @@ import * as L from './link.js';
 import * as Bio from './bio.js';
 import * as QR from './qr.js';
 
-const VERSION = '0.22';
+const VERSION = '0.24';
 const SILENT_MS = 60 * 60 * 1000;            // like LinkPolicy: warning after 1 hour without messages
 const MAX_AGE_S = 24 * 60 * 60;              // reject messages published > 24 h after they were written (replays)
 const LOCK_AFTER_MS = 5 * 60 * 1000;         // PIN again after 5 minutes in the background
@@ -55,7 +55,9 @@ const S = {
   pushState: null, subscribed: false, pushSentEndpoint: null, pushError: '',
   dk: null, dkRaw: null, ready: false, // 0.15: data key once unlocked; ready = saved copy loaded, may connect
   // 0.22: screen time. usage = today's minutes from the child; rules = what we last sent; requests = «15 minuti in più?»
-  usage: { day: '', time: 0, apps: [] }, rules: { version: 0, night: null, limits: [], sites: [], allow: [], deny: [] }, requests: [], editRules: null,
+  usage: { day: '', time: 0, apps: [] }, rules: { version: 0, night: null, limits: [], sites: [], allow: [], deny: [], places: [] }, requests: [], editRules: null,
+  // 0.24: «Dov'è?»: only the last answer (no history), the last «arrivato»/«uscito» per safe place.
+  where: { spot: null, asked: 0, none: '', noneTime: 0, n: 0, places: {} }, placeForm: false,
 };
 
 // ---------- Small helpers ----------
@@ -165,7 +167,7 @@ const Vault = (() => {
       if (!S.dk) return;
       const snap = { v: 1, alerts: S.alerts, reports: [...S.reports.values()], state: S.state, detail: S.detail,
         lastStatus: S.lastStatus, lastSeen: S.lastSeen, lastC2P: S.lastC2P, lastP2C: S.lastP2C,
-        usage: S.usage, rules: S.rules, requests: S.requests };
+        usage: S.usage, rules: S.rules, requests: S.requests, where: S.where };
       await db.set('vault', await seal(S.dk, enc.encode(JSON.stringify(snap)), AAD));
     },
     /** Puts the saved copy into S. Counters come with it, so re-reading the mailbox does not add the same messages twice. */
@@ -183,6 +185,8 @@ const Vault = (() => {
       if (snap.usage) S.usage = snap.usage;
       if (snap.rules) S.rules = snap.rules;
       S.requests = snap.requests || [];
+      if (snap.where) S.where = snap.where;
+      if (!S.rules.places) S.rules.places = [];
       return true;
     },
   };
@@ -222,7 +226,8 @@ function closeLocally(id) {
 function resetData() {
   S.alerts = []; S.reports = new Map(); S.state = null; S.detail = ''; S.lastStatus = 0;
   S.lastC2P = 0; S.lastP2C = 0;
-  S.usage = { day: '', time: 0, apps: [] }; S.rules = { version: 0, night: null, limits: [], sites: [], allow: [], deny: [] }; S.requests = [];
+  S.usage = { day: '', time: 0, apps: [] }; S.rules = { version: 0, night: null, limits: [], sites: [], allow: [], deny: [], places: [] }; S.requests = [];
+  S.where = { spot: null, asked: 0, none: '', noneTime: 0, n: 0, places: {} };
 }
 function apply(m, receivedAt) {
   S.lastSeen = Math.max(S.lastSeen, receivedAt);
@@ -258,6 +263,23 @@ function apply(m, receivedAt) {
       if (m.outcome !== L.EXTRA_ASK || !m.text) return 'NONE';
       S.requests = [{ pkg: m.text, label: m.app, minutes: m.caseId, time: m.time }, ...S.requests.filter(r => r.pkg !== m.text)].slice(0, 20);
       return 'EXTRA';
+    case 'LOCATION': {
+      const w = S.where;
+      if (m.outcome === L.LOC_HERE) {
+        const spot = L.parseWhere(m.text);
+        if (!spot || (w.spot && m.time < w.spot.received)) return 'NONE';
+        w.spot = { ...spot, received: m.time }; w.asked = 0; w.none = '';
+        return 'LOCATION';
+      }
+      if (m.outcome === L.LOC_NONE) { w.none = m.text; w.noneTime = m.time; w.asked = 0; return 'LOCATION_NONE'; }
+      if (m.outcome === L.LOC_PLACE && m.app) {
+        const old = w.places[m.app];
+        if (old && old.time > m.time) return 'NONE';
+        w.places[m.app] = { arrived: m.level === 1, time: m.time };
+        return 'PLACE';
+      }
+      return 'NONE';
+    }
     case 'PUSH':
       S.pushState = m.outcome === L.PUSH_ACTIVE ? 'ok' : m.outcome === L.PUSH_EXPIRED ? 'expired' : S.pushState;
       db.set('pushState', S.pushState).catch(() => {});
@@ -309,6 +331,12 @@ async function handle(ev, live) {
       // 0.22: our own rules and answers (also from another device of the parent).
       if (m.type === 'RULES' && m.caseId > S.rules.version) { S.rules = L.parseRules(m.caseId, m.fragments); saveSoon(); }
       if (m.type === 'EXTRA' && m.outcome !== L.EXTRA_ASK) { S.requests = S.requests.filter(r => r.pkg !== m.text); saveSoon(); }
+      // 0.24: «Dov'è?» asked from here or from another device of the parent.
+      if (m.type === 'LOCATION' && m.outcome === L.LOC_ASK) {
+        S.where.n = Math.max(S.where.n, m.caseId);
+        if (!S.where.spot || m.time > S.where.spot.received) S.where.asked = Math.max(S.where.asked, m.time);
+        saveSoon();
+      }
     }
   } catch { /* not ours, altered or replayed */ }
   scheduleRender();
@@ -316,7 +344,9 @@ async function handle(ev, live) {
 
 function announce(what, m) {
   if (what === 'NONE' || what === 'REPORT_UPDATED' && !m.fragments.length) return;
-  const text = what === 'EXTRA' ? 'Tuo figlio chiede ' + m.caseId + ' minuti in più' : what === 'ALERT' ? 'Nuovo avviso' : what === 'REPORT_OPENED' ? 'Segnalazione aperta' :
+  const text = what === 'EXTRA' ? 'Tuo figlio chiede ' + m.caseId + ' minuti in più' :
+    what === 'LOCATION' ? 'Posizione di tuo figlio arrivata' : what === 'LOCATION_NONE' ? 'Posizione non disponibile' :
+    what === 'PLACE' ? (m.level === 1 ? 'Arrivato: ' : 'Uscito: ') + m.app : what === 'ALERT' ? 'Nuovo avviso' : what === 'REPORT_OPENED' ? 'Segnalazione aperta' :
     what === 'REPORT_UPDATED' ? 'Nuovo messaggio nella segnalazione' : m.state === 'INTERRUPTED' ? 'Protezione interrotta' : 'Stato aggiornato';
   toast(text);
   try { navigator.setAppBadge && navigator.setAppBadge(); } catch { /* not supported */ }
@@ -745,6 +775,8 @@ function childPage() {
         h('li', {}, 'Apri Phylax sul suo telefono: deve dire «Protezione attiva».'),
         h('li', {}, 'Se l\'app non c\'è più, parlane con lui: era un patto fatto insieme.'))));
   }
+  out.push(h('div', { class: 'section' }, 'Dov\'è?'));
+  out.push(whereCard());
   out.push(h('div', { class: 'section' }, 'Tempo di oggi'));
   out.push(usageCard());
   out.push(h('div', { class: 'section' }, 'Siti'));
@@ -883,10 +915,70 @@ function sitesPage() {
 }
 async function sendRules(edit) {
   const r = { version: Math.max(S.rules.version + 1, Math.floor(Date.now() / 1000) - 1700000000), night: edit.night, limits: edit.limits,
-    sites: edit.sites || [], allow: edit.allow || [], deny: edit.deny || [], sitesChosen: !!edit.sitesChosen };
+    sites: edit.sites || [], allow: edit.allow || [], deny: edit.deny || [], sitesChosen: !!edit.sitesChosen,
+    places: edit.places || S.rules.places || [] };
   if (!await sendToChild(L.rulesMessage(Date.now(), r))) return false;
   S.rules = r; saveSoon();
   return true;
+}
+// ---------- 0.24: «Dov'è?» and safe places ----------
+async function askWhere() {
+  const n = S.where.n + 1;
+  if (!await sendToChild(L.locateMessage(Date.now(), n))) return;
+  S.where.n = n; S.where.asked = Date.now(); saveSoon();
+  toast('Richiesta inviata'); render();
+}
+function mapUrl(p) {
+  const ios = /iPhone|iPad|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  return ios ? 'https://maps.apple.com/?ll=' + p.lat + ',' + p.lon + '&q=Tuo%20figlio'
+    : 'https://www.openstreetmap.org/?mlat=' + p.lat + '&mlon=' + p.lon + '#map=17/' + p.lat + '/' + p.lon;
+}
+function whereCard() {
+  const w = S.where, card = h('div', { class: 'card' }), now = Date.now();
+  if (w.asked) {
+    card.append(h('h3', { class: 'card-title' }, 'Chiesto alle ' + hm(w.asked) + (now - w.asked < 180000 ? ', in attesa…' : ', nessuna risposta ancora')),
+      h('p', { class: 'caption' }, 'Di solito arriva in meno di un minuto, se il telefono di tuo figlio è acceso e ha internet.'));
+  } else if (w.none && (!w.spot || w.noneTime > w.spot.received)) {
+    card.append(h('h3', { class: 'card-title' }, 'Posizione non disponibile'), h('p', { class: 'caption' }, w.none + ' (alle ' + hm(w.noneTime) + ')'));
+  }
+  if (w.spot) {
+    const p = w.spot;
+    card.append(h('h3', { class: 'card-title' }, 'Alle ' + hm(p.fixTime) + (p.meters ? ', precisione circa ' + p.meters + ' m' : '')),
+      h('p', { class: 'caption' }, p.lat.toFixed(5) + ', ' + p.lon.toFixed(5) + ' · c\'è solo l\'ultima posizione, nessuno storico.'),
+      h('a', { class: 'btn outline', href: mapUrl(p), target: '_blank', rel: 'noopener noreferrer' }, 'Apri nella mappa'));
+    if (!S.placeForm) card.append(h('button', { class: 'btn outline', onclick: () => { S.placeForm = true; render(); } }, 'Salva come luogo sicuro'));
+    else {
+      const name = h('input', { type: 'text', class: 'text-input', placeholder: 'Casa, Scuola, Nonni…', maxlength: '30', 'aria-label': 'Nome del luogo' });
+      const radius = h('select', { class: 'text-input', 'aria-label': 'Raggio' },
+        ...[100, 200, 500].map(r => h('option', r === 200 ? { value: String(r), selected: 'selected' } : { value: String(r) }, 'Entro ' + r + ' m')));
+      card.append(h('div', { class: 'place-form' }, name, radius,
+        h('p', { class: 'caption' }, 'Ti avvisiamo quando tuo figlio arriva qui o esce, nient\'altro.'),
+        h('button', { class: 'btn primary', onclick: async () => {
+          const place = L.makePlace(name.value, p.lat, p.lon, Math.max(Number(radius.value), Math.min(1000, p.meters || 0)));
+          if (!place) { toast('Scrivi un nome'); return; }
+          const list = L.setPlace(S.rules.places || [], place);
+          if (list === (S.rules.places || [])) { toast('Al massimo 10 luoghi'); return; }
+          if (await sendRules({ ...S.rules, places: list })) { S.placeForm = false; toast('Luogo salvato e mandato'); render(); }
+        } }, 'Salva e manda'),
+        h('button', { class: 'btn ghost', onclick: () => { S.placeForm = false; render(); } }, 'Annulla')));
+    }
+  } else if (!w.asked && !w.none) {
+    card.append(h('p', {}, 'Chiedi dove si trova il telefono di tuo figlio: risponde una volta sola, e lui vede una notifica.'));
+  }
+  card.append(h('button', { class: 'btn primary', onclick: askWhere }, w.spot ? 'Chiedi di nuovo' : 'Chiedi dov\'è'));
+  card.append(h('h3', { class: 'card-title sub' }, 'Luoghi sicuri'));
+  const places = S.rules.places || [];
+  if (!places.length) card.append(h('p', { class: 'caption' }, 'Nessuno. Dopo una posizione puoi salvarla come «Casa» o «Scuola»: ti avvisiamo solo quando arriva o esce.'));
+  for (const pl of places) {
+    const e = w.places[pl.name];
+    card.append(h('div', { class: 'site-row' }, h('span', {}, pl.name + ' (' + pl.radius + ' m)' + (e ? ' · ' + (e.arrived ? 'arrivato alle ' : 'uscito alle ') + hm(e.time) : '')),
+      h('button', { class: 'link', 'aria-label': 'Togli ' + pl.name, onclick: async () => {
+        if (!confirm('Togliere «' + pl.name + '»?')) return;
+        if (await sendRules({ ...S.rules, places: places.filter(x => x.name !== pl.name) })) render();
+      } }, 'Togli')));
+  }
+  if (places.length) card.append(h('p', { class: 'caption' }, 'Sul telefono di tuo figlio serve la posizione «sempre».'));
+  return card;
 }
 async function answerExtra(r, yes) {
   if (!await sendToChild(L.extraMessage(Date.now(), r.pkg, r.label, r.minutes, yes ? L.EXTRA_YES : L.EXTRA_NO))) return;

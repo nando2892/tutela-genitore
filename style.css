@@ -178,3 +178,8 @@ ul.plain li { margin: 6px 0; }
 .site-add { display: flex; gap: 10px; margin-top: 12px; }
 .site-add .site-input { flex: 1; min-width: 0; font: inherit; padding: 10px 12px; border-radius: 12px; border: 1.5px solid var(--border); background: var(--surface); color: var(--text); }
 .site-add .btn { width: auto; flex: none; margin: 0; }
+/* 0.24: «Dov'è?» */
+a.btn { display: block; text-align: center; text-decoration: none; box-sizing: border-box; }
+.card-title.sub { margin-top: 18px; font-size: 17px; }
+.place-form { display: flex; flex-direction: column; gap: 8px; margin-top: 12px; }
+.place-form .text-input { font: inherit; padding: 10px 12px; border-radius: 12px; border: 1.5px solid var(--border); background: var(--surface); color: var(--text); }
