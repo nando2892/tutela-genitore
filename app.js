@@ -8,7 +8,7 @@ import * as L from './link.js';
 import * as Bio from './bio.js';
 import * as QR from './qr.js';
 
-const VERSION = '0.17';
+const VERSION = '0.17.1';
 const SILENT_MS = 60 * 60 * 1000;            // like LinkPolicy: warning after 1 hour without messages
 const MAX_AGE_S = 24 * 60 * 60;              // reject messages published > 24 h after they were written (replays)
 const LOCK_AFTER_MS = 5 * 60 * 1000;         // PIN again after 5 minutes in the background
@@ -471,11 +471,16 @@ function scheduleRender() {
   renderPending = true;
   requestAnimationFrame(() => { renderPending = false; render(); });
 }
-const shield = () => h('img', { class: 'logo', src: 'icons/shield.svg', alt: '' });
+const shield = () => h('img', { class: 'logo', src: 'icons/mark.svg', alt: '' });
+// "Phylax …" titles show the brand wordmark: lowercase "phylax" in Baloo 2 ExtraBold, then the rest plain.
+const titleEl = title => title.startsWith('Phylax')
+  ? h('h1', { class: 'wordmark', 'aria-label': title }, h('span', { class: 'word' }, 'phylax'),
+      title.length > 6 ? h('span', { class: 'rest' }, title.slice(6).trim().toLowerCase()) : null)
+  : h('h1', {}, title);
 function header(title, back) {
   return h('div', { class: 'head' },
     back ? h('button', { class: 'back', 'aria-label': 'Indietro', onclick: () => go('') }, '‹') : shield(),
-    h('h1', {}, title));
+    titleEl(title));
 }
 
 function render() {
@@ -555,7 +560,7 @@ function pinPage(title, sub, choosing, change) {
   if (bio && S.bioAuto) { S.bioAuto = false; setTimeout(() => bioUnlock(false), 300); }
   else setTimeout(() => input.focus(), 50);
   return [h('div', { class: 'lock' },
-    change ? header(title, true) : h('div', { class: 'head' }, shield(), h('h1', {}, title)),
+    change ? header(title, true) : h('div', { class: 'head' }, shield(), titleEl(title)),
     h('p', { class: 'sub' }, sub), input, again, err, btn, bio,
     change ? null : h('p', { class: 'caption center' }, 'Il PIN resta solo su questo telefono (PBKDF2). Se lo dimentichi: abbina di nuovo.'))];
 }

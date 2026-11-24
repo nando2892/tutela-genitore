@@ -1,3 +1,5 @@
+/* Baloo 2 (SIL OFL 1.1, fonts/OFL.txt): variable font, served from this folder (no CDN). Only the wordmark uses it. */
+@font-face { font-family: 'Baloo 2'; src: url('fonts/Baloo2-wght.ttf') format('truetype'); font-weight: 400 800; font-display: swap; }
 /* Phylax Genitore (web): same palette and shapes as the Android app (shared/src/main/res/values/colors.xml). */
 :root {
   --bg: #F8FAFC; --surface: #FFFFFF; --surface-alt: #F1F5F9; --border: #E2E8F0;
@@ -5,7 +7,7 @@
   --primary: #0F766E; --primary-dark: #115E59; --primary-soft: #CCFBF1; --primary-light: #14B8A6;
   --danger: #E11D48; --danger-soft: #FFE4E6; --warning: #B45309; --warning-soft: #FEF3C7; --doubt: #6D28D9; --doubt-soft: #EDE9FE;
   --success: #15803D; --success-soft: #DCFCE7; --idle: #94A3B8; --idle-soft: #E2E8F0; --bubble: #F1F5F9;
-  --indigo: #4338CA;
+  --indigo: #4338CA; --brand: #2E4057;
   color-scheme: light;
 }
 * { box-sizing: border-box; }
@@ -20,7 +22,10 @@ main { max-width: 520px; margin: 0 auto; padding: 24px 16px 40px; }
 
 .head { display: flex; align-items: center; gap: 12px; margin: 8px 0 4px; }
 .head h1 { font-size: 28px; font-weight: 500; margin: 0; letter-spacing: -0.01em; }
-.head .logo { width: 34px; height: 38px; flex: none; }
+.head h1.wordmark { display: flex; align-items: baseline; gap: 8px; }
+.wordmark .word { font-family: 'Baloo 2', ui-rounded, system-ui, sans-serif; font-weight: 800; font-size: 34px; line-height: 1; color: var(--brand); letter-spacing: -0.01em; }
+.wordmark .rest { font-size: 18px; font-weight: 500; color: var(--muted); }
+.head .logo { width: 44px; height: 44px; flex: none; }
 .head .back { background: none; border: 0; font-size: 28px; padding: 0 8px 0 0; color: var(--text); cursor: pointer; }
 .sub { color: var(--muted); margin: 0 0 20px; }
 
