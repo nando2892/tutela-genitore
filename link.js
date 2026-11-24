@@ -11,7 +11,7 @@ export const C2P = 1, P2C = 2, WIRE_VERSION = 1, TOPIC_LENGTH = 32;
 export const TYPES = ['ALERT', 'CASE_OPEN', 'CASE_FRAGMENTS', 'STATUS', 'CLOSE_CASE', 'PUSH'];
 export const PUSH_ACTIVE = 1, PUSH_EXPIRED = 2;
 export const STATES = ['ACTIVE', 'INTERRUPTED', 'RESUMED', 'STOPPED', 'PAIRED'];
-export const LEVEL_HIGH = 1, OUTCOME_OK = 1, OUTCOME_INTERVENE = 2;
+export const LEVEL_HIGH = 1, LEVEL_DOUBT = 2, OUTCOME_OK = 1, OUTCOME_INTERVENE = 2;
 const B32 = 'abcdefghijklmnopqrstuvwxyz234567';
 
 export function b64(bytes) {

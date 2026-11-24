@@ -1,5 +1,5 @@
 // Offline app shell only. Never caches ntfy.sh (alerts are rebuilt from the ciphertext at each opening).
-const CACHE = 'phylax-genitore-0.11.1';
+const CACHE = 'phylax-genitore-0.12';
 const SHELL = ['./', 'index.html', 'style.css', 'app.js', 'link.js', 'bio.js', 'manifest.json',
   'icons/icon.svg', 'icons/shield.svg', 'icons/icon-192.png', 'icons/icon-512.png', 'icons/apple-touch-icon.png'];
 

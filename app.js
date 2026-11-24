@@ -5,7 +5,7 @@
 import * as L from './link.js';
 import * as Bio from './bio.js';
 
-const VERSION = '0.11.1';
+const VERSION = '0.12';
 const SILENT_MS = 60 * 60 * 1000;            // like LinkPolicy: warning after 1 hour without messages
 const MAX_AGE_S = 24 * 60 * 60;              // reject messages published > 24 h after they were written (replays)
 const LOCK_AFTER_MS = 5 * 60 * 1000;         // PIN again after 5 minutes in the background
@@ -143,7 +143,7 @@ function apply(m, receivedAt) {
   S.lastSeen = Math.max(S.lastSeen, receivedAt);
   switch (m.type) {
     case 'ALERT':
-      S.alerts.unshift({ high: m.level === L.LEVEL_HIGH, category: m.category, app: m.app, text: m.text, time: m.time });
+      S.alerts.unshift({ high: m.level === L.LEVEL_HIGH, doubt: m.level === L.LEVEL_DOUBT, category: m.category, app: m.app, text: m.text, time: m.time });
       S.alerts[0].archived = S.archived.get(alertKey(S.alerts[0])) === true;
       S.alerts.length = Math.min(S.alerts.length, MAX_ALERTS);
       return 'ALERT';
@@ -551,7 +551,7 @@ function homePage() {
 }
 function alertCard(a, archived) {
   return h('div', { class: 'card alert' + (archived ? ' archived' : '') },
-    h('div', { class: 'alert-top' }, h('span', { class: 'chip ' + (a.high ? 'danger' : 'warning') }, a.high ? 'Rischio alto' : 'Da verificare'),
+    h('div', { class: 'alert-top' }, h('span', { class: 'chip ' + (a.high ? 'danger' : a.doubt ? 'doubt' : 'warning') }, a.high ? 'Rischio alto' : a.doubt ? 'Dubbio · da guardare' : 'Da verificare'),
       h('span', { class: 'time' }, hm(a.time))),
     h('h3', {}, a.category), h('p', { class: 'meta' }, a.app), h('div', { class: 'quote' }, a.text),
     h('button', { class: 'link', onclick: () => { setArchived(a, !archived); toast(archived ? 'Rimesso tra gli avvisi' : 'Avviso archiviato'); render(); } },

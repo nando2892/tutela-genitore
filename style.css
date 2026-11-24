@@ -3,7 +3,7 @@
   --bg: #F8FAFC; --surface: #FFFFFF; --surface-alt: #F1F5F9; --border: #E2E8F0;
   --text: #0F172A; --muted: #64748B;
   --primary: #0F766E; --primary-dark: #115E59; --primary-soft: #CCFBF1; --primary-light: #14B8A6;
-  --danger: #E11D48; --danger-soft: #FFE4E6; --warning: #B45309; --warning-soft: #FEF3C7;
+  --danger: #E11D48; --danger-soft: #FFE4E6; --warning: #B45309; --warning-soft: #FEF3C7; --doubt: #6D28D9; --doubt-soft: #EDE9FE;
   --success: #15803D; --success-soft: #DCFCE7; --idle: #94A3B8; --idle-soft: #E2E8F0; --bubble: #F1F5F9;
   --indigo: #4338CA;
   color-scheme: light;
@@ -60,6 +60,7 @@ main { max-width: 520px; margin: 0 auto; padding: 24px 16px 40px; }
 .chip { display: inline-block; font-size: 14px; padding: 3px 12px; border-radius: 999px; }
 .chip.danger { background: var(--danger-soft); color: var(--danger); }
 .chip.warning { background: var(--warning-soft); color: var(--warning); }
+.chip.doubt { background: var(--doubt-soft); color: var(--doubt); }
 .alert-top { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
 .alert-top .time { color: var(--muted); font-size: 15px; }
 .alert h3 { font-size: 19px; font-weight: 500; margin: 0 0 6px; }

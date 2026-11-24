@@ -6,6 +6,7 @@ App web del genitore per ricevere, cifrati, gli avvisi dall'app Android «Phylax
 - Cifratura end-to-end nel browser (WebCrypto): ECDH P-256, HKDF-SHA256, AES-256-GCM. La chiave privata non lascia il telefono e non è esportabile.
 - Consegna tramite [ntfy.sh](https://ntfy.sh) (gratuito, senza account): il server vede solo testo cifrato.
 - Sul telefono restano solo chiavi, contatori e l'impronta del PIN; gli avvisi non vengono salvati.
+- Tre livelli di avviso (0.12): **Rischio alto** (rosso), **Da verificare** (ambra), **Dubbio · da guardare** (viola: segnale incerto, mandato per sicurezza).
 
 ## Su iPhone
 1. Apri il sito in Safari › Condividi › **Aggiungi alla schermata Home**.
