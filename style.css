@@ -106,3 +106,7 @@ main { max-width: 520px; margin: 0 auto; padding: 24px 16px 40px; }
 .shake { animation: shake 0.4s; border-color: var(--danger); }
 @keyframes shake { 0%, 100% { transform: translateX(0); } 20%, 60% { transform: translateX(-10px); } 40%, 80% { transform: translateX(10px); } }
 @media (prefers-reduced-motion: reduce) { .shake { animation: none; } }
+
+/* 0.15: pairing QR */
+.qr { width: min(280px, 100%); margin: 8px auto 4px; background: #fff; padding: 6px; border-radius: 12px; }
+.qr svg { display: block; width: 100%; height: auto; }

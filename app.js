@@ -1,11 +1,14 @@
 // Phylax Genitore — web app (PWA) for the parent's iPhone. Same protocol and look as the Android app.
 // Stores on this device ONLY: the key pair (private key not extractable), topics, counters, PIN hash,
-// last contact time. Alerts and reports are NOT stored: at every opening they are rebuilt by decrypting what
-// ntfy.sh still keeps (about 12 hours, ciphertext only), including our own "close" messages.
+// last contact time. Since 0.15 also alerts, archive, reports and status, ENCRYPTED (AES-256-GCM) with a
+// random data key that is itself stored only wrapped by a key derived from the PIN (PBKDF2, never the PIN
+// itself) and, if Face ID is on, by a non-extractable key of this browser. At every opening what ntfy.sh
+// still keeps (about 12 hours, ciphertext only) is read again; already-seen messages are skipped by counter.
 import * as L from './link.js';
 import * as Bio from './bio.js';
+import * as QR from './qr.js';
 
-const VERSION = '0.14';
+const VERSION = '0.15';
 const SILENT_MS = 60 * 60 * 1000;            // like LinkPolicy: warning after 1 hour without messages
 const MAX_AGE_S = 24 * 60 * 60;              // reject messages published > 24 h after they were written (replays)
 const LOCK_AFTER_MS = 5 * 60 * 1000;         // PIN again after 5 minutes in the background
@@ -50,6 +53,7 @@ const S = {
   online: false, loaded: false, error: '', outbox: [], outboxWait: 5000,
   showCode: true, archived: new Map(), showArchived: false,
   pushState: null, subscribed: false, pushSentEndpoint: null, pushError: '',
+  dk: null, dkRaw: null, ready: false, // 0.15: data key once unlocked; ready = saved copy loaded, may connect
 };
 let streamCtrl = null, reconnectTimer = null, lastActivity = 0, queue = Promise.resolve();
 
@@ -74,10 +78,10 @@ function hm(t) {
 function ago(ms) { const m = Math.floor(ms / 60000); return m < 1 ? 'adesso' : m < 60 ? m + ' min fa' : Math.floor(m / 60) + ' h fa'; }
 const spaced = v => v ? v.slice(0, 3) + ' ' + v.slice(3) : '';
 let toastTimer;
-function toast(text) {
+function toast(text, ms = 2500) {
   const t = document.getElementById('toast');
   t.textContent = text; t.hidden = false;
-  clearTimeout(toastTimer); toastTimer = setTimeout(() => { t.hidden = true; }, 2500);
+  clearTimeout(toastTimer); toastTimer = setTimeout(() => { t.hidden = true; }, ms);
 }
 async function copy(text, what) {
   try { await navigator.clipboard.writeText(text); }
@@ -91,22 +95,96 @@ const route = () => (location.hash || '#/').slice(2);
 const go = r => { location.hash = '#/' + r; };
 
 // ---------- PIN (PBKDF2-SHA256 via WebCrypto) ----------
-async function pinHash(pin, salt, iterations) {
+// 512 bits from one PBKDF2: the first 256 are the stored check value (same as before 0.15, so old PINs keep
+// working), the second 256 are never stored and wrap the data key (0.15).
+async function pinBits(pin, salt, iterations) {
   const k = await crypto.subtle.importKey('raw', new TextEncoder().encode(pin), 'PBKDF2', false, ['deriveBits']);
-  return new Uint8Array(await crypto.subtle.deriveBits({ name: 'PBKDF2', hash: 'SHA-256', salt, iterations }, k, 256));
+  const bits = new Uint8Array(await crypto.subtle.deriveBits({ name: 'PBKDF2', hash: 'SHA-256', salt, iterations }, k, 512));
+  return { hash: bits.slice(0, 32), kek: bits.slice(32) };
 }
 async function setPin(pin) {
   const salt = crypto.getRandomValues(new Uint8Array(16));
+  const bits = await pinBits(pin, salt, PBKDF2_ITERATIONS);
   // len: lets the lock screen unlock by itself at the last digit (no "Sblocca" tap).
-  S.pin = { salt: L.b64(salt), hash: L.b64(await pinHash(pin, salt, PBKDF2_ITERATIONS)), iterations: PBKDF2_ITERATIONS, len: pin.length };
+  S.pin = { salt: L.b64(salt), hash: L.b64(bits.hash), iterations: PBKDF2_ITERATIONS, len: pin.length };
   await db.set('pin', S.pin);
+  await Vault.withPin(bits.kek); // new PIN (or changed): the data key is wrapped again with it
+  bits.kek.fill(0);
 }
+/** Returns the PIN-derived wrapping bits if the PIN is right, else null. */
 async function checkPin(pin) {
-  const got = await pinHash(pin, L.unb64(S.pin.salt), S.pin.iterations), want = L.unb64(S.pin.hash);
-  let diff = got.length ^ want.length;
-  for (let i = 0; i < got.length; i++) diff |= got[i] ^ want[i];
-  return diff === 0;
+  const bits = await pinBits(pin, L.unb64(S.pin.salt), S.pin.iterations), want = L.unb64(S.pin.hash);
+  let diff = bits.hash.length ^ want.length;
+  for (let i = 0; i < bits.hash.length; i++) diff |= bits.hash[i] ^ want[i];
+  if (diff !== 0) { bits.kek.fill(0); return null; }
+  return bits.kek;
 }
+
+// ---------- 0.15: alerts saved on this phone, encrypted at rest ----------
+// A random 256-bit data key encrypts the saved copy. On disk the data key exists only wrapped: with the
+// PIN-derived bits (PBKDF2) and, if Face ID is on, with a non-extractable AES key of this browser. While the
+// page is open it stays in memory (like the link keys), so a PIN change or turning Face ID on re-wraps it.
+const Vault = (() => {
+  const subtle = crypto.subtle, enc = new TextEncoder();
+  const AAD = enc.encode('phylax-vault-1'), WRAP = enc.encode('phylax-dk-1');
+  const gcm = raw => subtle.importKey('raw', raw, 'AES-GCM', false, ['encrypt', 'decrypt']);
+  async function seal(key, bytes, aad) {
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    return { iv: L.b64(iv), ct: L.b64(new Uint8Array(await subtle.encrypt({ name: 'AES-GCM', iv, additionalData: aad }, key, bytes))) };
+  }
+  async function unseal(key, box, aad) {
+    return new Uint8Array(await subtle.decrypt({ name: 'AES-GCM', iv: L.unb64(box.iv), additionalData: aad }, key, L.unb64(box.ct)));
+  }
+  async function use(raw) { S.dkRaw = raw; S.dk = await gcm(raw); }
+  const V = {
+    /** After the right PIN, or a new PIN: opens the data key (or makes the first one) and wraps it with this PIN. */
+    async withPin(kek) {
+      const box = await db.get('dkPin');
+      if (!S.dkRaw && box) { try { await use(await unseal(await gcm(kek), box, WRAP)); } catch { /* damaged: start over */ } }
+      if (!S.dkRaw) { await db.del('vault'); await db.del('dkBio'); await use(crypto.getRandomValues(new Uint8Array(32))); }
+      await db.set('dkPin', await seal(await gcm(kek), S.dkRaw, WRAP));
+      if (S.bio && !await db.get('dkBio')) await V.addBio();
+    },
+    /** After Face ID: only the copy wrapped with this browser's key. False: nothing saved is readable this time. */
+    async withBio() {
+      try {
+        const k = await db.get('bioKek'), box = await db.get('dkBio');
+        if (k && box) { await use(await unseal(k, box, WRAP)); return true; }
+      } catch { /* fall through */ }
+      return false;
+    },
+    async addBio() {
+      if (!S.dkRaw) return;
+      let k = await db.get('bioKek');
+      if (!k) { k = await subtle.generateKey({ name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']); await db.set('bioKek', k); }
+      await db.set('dkBio', await seal(k, S.dkRaw, WRAP));
+    },
+    async forgetBio() { await db.del('dkBio'); await db.del('bioKek'); },
+    async save() {
+      if (!S.dk) return;
+      const snap = { v: 1, alerts: S.alerts, reports: [...S.reports.values()], state: S.state, detail: S.detail,
+        lastStatus: S.lastStatus, lastSeen: S.lastSeen, lastC2P: S.lastC2P, lastP2C: S.lastP2C };
+      await db.set('vault', await seal(S.dk, enc.encode(JSON.stringify(snap)), AAD));
+    },
+    /** Puts the saved copy into S. Counters come with it, so the ntfy backlog does not add the same messages twice. */
+    async load() {
+      const box = S.dk && await db.get('vault');
+      if (!box) return false;
+      let snap;
+      try { snap = JSON.parse(new TextDecoder().decode(await unseal(S.dk, box, AAD))); } catch { return false; }
+      if (!snap || snap.v !== 1) return false;
+      S.alerts = (snap.alerts || []).slice(0, MAX_ALERTS);
+      S.reports = new Map((snap.reports || []).map(r => [r.id, r]));
+      S.state = snap.state || null; S.detail = snap.detail || ''; S.lastStatus = snap.lastStatus || 0;
+      S.lastSeen = Math.max(S.lastSeen, snap.lastSeen || 0);
+      S.lastC2P = snap.lastC2P || 0; S.lastP2C = snap.lastP2C || 0;
+      return true;
+    },
+  };
+  return V;
+})();
+let saveTimer = null;
+function saveSoon() { clearTimeout(saveTimer); saveTimer = setTimeout(() => Vault.save().catch(() => {}), 400); }
 
 // ---------- Received data (same rules as ParentStore.java) ----------
 // ---------- Archive (local only: a key per alert in IndexedDB, nothing is sent) ----------
@@ -128,6 +206,7 @@ function setArchived(a, on) {
   S.archived.delete(k); S.archived.set(k, on); // false = put back by the parent: a re-read closure won't archive it again
   while (S.archived.size > MAX_ARCHIVED_KEYS) S.archived.delete(S.archived.keys().next().value);
   db.set('archived', [...S.archived]).catch(() => {});
+  saveSoon();
 }
 function closeLocally(id) {
   const r = S.reports.get(id);
@@ -203,6 +282,7 @@ async function handle(ev, live) {
       if (ev.time - m.time / 1000 > MAX_AGE_S) return;
       S.lastC2P = header.counter;
       const what = apply(m, ev.time * 1000);
+      saveSoon();
       const fresh = header.counter > S.seenMax;
       if (fresh) { S.seenMax = header.counter; db.set('seenMax', S.seenMax); }
       if (S.lastSeen - S.lastSeenSaved > 60000) { S.lastSeenSaved = S.lastSeen; db.set('lastSeen', S.lastSeen); }
@@ -212,7 +292,7 @@ async function handle(ev, live) {
       const { header, plaintext } = await L.open(S.keys.p2c, L.P2C, ev.message, S.lastP2C);
       S.lastP2C = header.counter;
       const m = L.decodeMessage(plaintext);
-      if (m.type === 'CLOSE_CASE') closeLocally(m.caseId);
+      if (m.type === 'CLOSE_CASE') { closeLocally(m.caseId); saveSoon(); }
     }
   } catch { /* not ours, altered or replayed */ }
   scheduleRender();
@@ -233,7 +313,7 @@ function announce(what, m) {
 // ---------- ntfy connection ----------
 function enqueue(fn) { queue = queue.then(fn, fn); return queue; }
 async function connect() {
-  if (!S.pair || streamCtrl) return;
+  if (!S.pair || streamCtrl || !S.ready) return; // 0.15: never before the saved copy is loaded
   clearTimeout(reconnectTimer);
   const ctrl = streamCtrl = new AbortController();
   try {
@@ -267,6 +347,7 @@ async function closeReport(id, outcome) {
   await db.set('sent', S.sent);
   const wire = await L.seal(S.keys.p2c, L.P2C, null, S.sent, L.closeMessage(Date.now(), id, outcome));
   closeLocally(id);
+  saveSoon();
   S.outbox.push(wire);
   await db.set('outbox', S.outbox);
   drain();
@@ -366,7 +447,8 @@ async function newPairing() {
   resetData();
   await db.set('pair', S.pair);
   S.archived = new Map();
-  for (const k of ['child', 'sent', 'seenMax', 'lastSeen', 'outbox', 'archived', 'pushSent', 'pushState']) await db.del(k);
+  for (const k of ['child', 'sent', 'seenMax', 'lastSeen', 'outbox', 'archived', 'pushSent', 'pushState', 'vault']) await db.del(k);
+  clearTimeout(saveTimer);
   disconnect(true);
 }
 
@@ -423,18 +505,21 @@ function pinPage(title, sub, choosing, change) {
       if (pin !== again.value.trim()) { err.textContent = 'I due PIN non coincidono.'; return; }
       btn.disabled = true;
       await setPin(pin); S.unlocked = true; toast(change ? 'PIN cambiato' : 'PIN impostato');
-      if (change) go(''); else render();
+      if (change) go(''); else afterUnlock();
       return;
     }
     if (checking || !pin) return;
     if (Date.now() < S.pinWaitUntil) { wrong('Troppi tentativi: riprova tra ' + Math.ceil((S.pinWaitUntil - Date.now()) / 1000) + ' s.'); return; }
     checking = true; btn.disabled = true;
-    const ok = await checkPin(pin);
-    checking = false; btn.disabled = false;
-    if (ok) {
+    const kek = await checkPin(pin);
+    if (kek) {
       if (!S.pin.len) { S.pin.len = pin.length; db.set('pin', S.pin).catch(() => {}); }
-      S.unlocked = true; S.pinFails = 0; render(); connect(); return;
+      try { await Vault.withPin(kek); } catch { /* storage problem: this time nothing is saved */ }
+      kek.fill(0);
+      checking = false; btn.disabled = false;
+      S.unlocked = true; S.pinFails = 0; afterUnlock(); return;
     }
+    checking = false; btn.disabled = false;
     if (probe === true) { if (input.value !== pin && input.value.length >= 6) submit(true); return; }
     S.pinFails++;
     if (S.pinFails >= 5) { S.pinWaitUntil = Date.now() + 30000 * Math.pow(2, S.pinFails - 5); }
@@ -463,6 +548,27 @@ function pinPage(title, sub, choosing, change) {
     change ? null : h('p', { class: 'caption center' }, 'Il PIN resta solo su questo telefono (PBKDF2). Se lo dimentichi: abbina di nuovo.'))];
 }
 
+/** After the PIN or Face ID: the saved copy (if this unlock could open it) is loaded once, then ntfy. */
+async function afterUnlock() {
+  if (S.dk && !S.vaultLoaded) {
+    S.vaultLoaded = true;
+    const live = S.ready ? { alerts: S.alerts, reports: S.reports, state: S.state, detail: S.detail, lastStatus: S.lastStatus, c2p: S.lastC2P, p2c: S.lastP2C } : null;
+    const got = await Vault.load().catch(() => false);
+    if (got && live) {
+      // Face ID first (no saved copy readable), PIN now: keep both what was saved and what arrived meanwhile.
+      const seen = new Set(S.alerts.map(alertKey));
+      for (const a of live.alerts) if (!seen.has(alertKey(a))) S.alerts.push(a);
+      S.alerts.sort((x, y) => y.time - x.time); S.alerts.length = Math.min(S.alerts.length, MAX_ALERTS);
+      for (const [id, r] of live.reports) S.reports.set(id, r);
+      if (live.lastStatus >= S.lastStatus) { S.state = live.state; S.detail = live.detail; S.lastStatus = live.lastStatus; }
+      S.lastC2P = Math.max(S.lastC2P, live.c2p); S.lastP2C = Math.max(S.lastP2C, live.p2c);
+    }
+    if (got) saveSoon();
+  }
+  S.ready = true;
+  render(); connect();
+}
+
 // ---------- Face ID (WebAuthn passkey on this iPhone; the PIN always works too) ----------
 async function bioUnlock(manual) {
   if (!S.bio || S.bioBusy || S.unlocked) return;
@@ -471,7 +577,11 @@ async function bioUnlock(manual) {
     const r = await Bio.unlock(S.bio, location.hostname, location.origin, L.unb64);
     if (r.ok) {
       if (r.count) { S.bio.count = r.count; db.set('bio', S.bio).catch(() => {}); }
-      S.unlocked = true; S.pinFails = 0; render(); connect(); return;
+      if (!S.dk && !await Vault.withBio().catch(() => false)) {
+        // First Face ID opening after the 0.15 update: the data key is wrapped only after one PIN entry.
+        toast('Per salvare gli avvisi su questo telefono entra una volta con il PIN', 6000);
+      }
+      S.unlocked = true; S.pinFails = 0; afterUnlock(); return;
     }
     if (manual) toast('Face ID non verificato: usa il PIN');
   } catch (e) {
@@ -481,12 +591,13 @@ async function bioUnlock(manual) {
 async function toggleBio() {
   if (S.bio) {
     if (!confirm('Disattivare lo sblocco con Face ID? Il PIN resta valido.')) return;
-    S.bio = null; await db.del('bio');
+    S.bio = null; await db.del('bio'); await Vault.forgetBio();
     toast('Face ID disattivato'); render(); return;
   }
   try {
     const rec = await Bio.register(location.hostname, location.origin); // straight from the tap: Face ID shows now
     S.bio = rec; await db.set('bio', rec);
+    await Vault.addBio().catch(() => {}); // Face ID can open the saved alerts too
     toast('Face ID attivato'); render();
   } catch (e) {
     toast(e && e.name === 'NotAllowedError' ? 'Attivazione annullata' : 'Face ID non attivato' + (e && e.message ? ': ' + e.message : ''));
@@ -529,7 +640,7 @@ function homePage() {
   }
   out.push(h('div', { class: 'section' }, 'Avvisi'));
   const active = S.alerts.filter(a => !a.archived), archived = S.alerts.filter(a => a.archived);
-  if (!active.length) out.push(h('div', { class: 'card empty' }, h('b', {}, 'Nessun avviso.'), 'Gli avvisi arrivano cifrati; questa app non li salva sul telefono.'));
+  if (!active.length) out.push(h('div', { class: 'card empty' }, h('b', {}, 'Nessun avviso.'), 'Gli avvisi arrivano cifrati e restano salvati, cifrati, solo su questo telefono.'));
   for (const a of active) out.push(alertCard(a, false));
   if (archived.length) {
     out.push(h('button', { class: 'toggle', 'aria-expanded': String(S.showArchived), onclick: () => { S.showArchived = !S.showArchived; render(); } },
@@ -546,7 +657,7 @@ function homePage() {
   }
   out.push(navRow('🔒', 'Blocca ora', S.bio ? 'Chiede Face ID o il PIN' : 'Chiede di nuovo il PIN', () => { S.unlocked = false; render(); }));
   out.push(h('p', { class: 'caption center' }, 'Versione web ' + VERSION + ' · consegna tramite ntfy.sh (gratuito, solo testo cifrato) · '
-    + 'gli avvisi restano cifrati sul server per circa 12 ore e non vengono salvati qui · solo prove con messaggi inventati [TUTELA-TEST]'));
+    + 'sul server restano cifrati per circa 12 ore; qui restano salvati cifrati (chiave protetta dal PIN o da Face ID) · solo prove con messaggi inventati [TUTELA-TEST]'));
   return out;
 }
 function alertCard(a, archived) {
@@ -587,8 +698,8 @@ function pairPage() {
     out.push(h('p', { class: 'sub' }, 'Crea un codice e incollalo sul telefono di tuo figlio.'));
     out.push(h('div', { class: 'card' },
       h('ol', { class: 'steps' },
-        h('li', {}, 'Tocca «Crea codice di abbinamento» e poi «Copia».'),
-        h('li', {}, 'Mandalo sul telefono di tuo figlio (o scrivilo): Phylax › Telefono del genitore › PIN genitore › incolla › Abbina.'),
+        h('li', {}, 'Tocca «Crea codice di abbinamento»: compare un QR.'),
+        h('li', {}, 'Sul telefono di tuo figlio: Phylax › Telefono del genitore › PIN genitore › «Fotografa il QR» (oppure copia e incolla il codice) › Abbina.'),
         h('li', {}, 'Confrontate il codice di verifica a 6 cifre: deve essere uguale sui due telefoni.')),
       h('button', { class: 'btn primary', onclick: async e => { e.target.disabled = true; await newPairing(); render(); } }, 'Crea codice di abbinamento')));
     return out;
@@ -603,6 +714,15 @@ function pairPage() {
     out.push(h('p', { class: 'sub' }, 'In attesa del telefono di tuo figlio.'));
   }
   const box = h('div', { class: 'code-box' + (S.showCode ? '' : ' masked') }, S.pair.code);
+  if (!S.child) {
+    // 0.15: QR of the same code, made here (qr.js); the SVG contains only fixed characters and numbers.
+    const qr = h('div', { class: 'qr' });
+    try { qr.innerHTML = QR.svg(QR.encode(S.pair.code, 'M')); } catch { qr.textContent = 'QR non disponibile: usa il codice.'; }
+    out.push(h('div', { class: 'card' },
+      h('p', { class: 'card-head' }, 'Inquadra questo QR dal telefono di tuo figlio'),
+      qr,
+      h('p', { class: 'caption' }, 'Sul suo telefono: Phylax › PIN › Telefono del genitore › «Fotografa il QR». Poi tocca «Abbina questo telefono».')));
+  }
   out.push(h('div', { class: 'card' },
     h('p', { class: 'meta' }, 'Codice di abbinamento (contiene solo la chiave pubblica e i due topic)'),
     box,
@@ -611,7 +731,7 @@ function pairPage() {
     h('button', { class: 'btn ghost', onclick: () => { S.showCode = !S.showCode; render(); } }, S.showCode ? 'Nascondi codice' : 'Mostra codice'),
     S.child ? null : h('ol', { class: 'steps' },
       h('li', {}, 'Sul telefono di tuo figlio: Phylax › Telefono del genitore › PIN genitore.'),
-      h('li', {}, 'Incolla il codice e tocca Abbina.'),
+      h('li', {}, 'Fotografa il QR qui sopra (o incolla il codice) e tocca Abbina.'),
       h('li', {}, 'Qui comparirà il codice di verifica a 6 cifre.'))));
   out.push(h('button', { class: 'btn danger', onclick: async () => {
     if (!confirm('Nuovo abbinamento? Il telefono di tuo figlio non potrà più raggiungere questa app finché non incolli il nuovo codice.')) return;
