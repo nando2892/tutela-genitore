@@ -8,7 +8,7 @@ import * as L from './link.js';
 import * as Bio from './bio.js';
 import * as QR from './qr.js';
 
-const VERSION = '0.17.1';
+const VERSION = '0.21';
 const SILENT_MS = 60 * 60 * 1000;            // like LinkPolicy: warning after 1 hour without messages
 const MAX_AGE_S = 24 * 60 * 60;              // reject messages published > 24 h after they were written (replays)
 const LOCK_AFTER_MS = 5 * 60 * 1000;         // PIN again after 5 minutes in the background
@@ -479,9 +479,24 @@ const titleEl = title => title.startsWith('Phylax')
   : h('h1', {}, title);
 function header(title, back) {
   return h('div', { class: 'head' },
-    back ? h('button', { class: 'back', 'aria-label': 'Indietro', onclick: () => go('') }, '‹') : shield(),
+    back != null && back !== false ? h('button', { class: 'back', 'aria-label': 'Indietro', onclick: () => go(back === true ? '' : back) }, '‹') : shield(),
     titleEl(title));
 }
+// 0.21: three tabs at the bottom (Avvisi / Figlio / Impostazioni); technical details only under Impostazioni › Avanzate.
+const TAB_ICONS = {
+  alerts: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a6 6 0 0 0-6 6v3.6L4.3 15.5A1 1 0 0 0 5.2 17h13.6a1 1 0 0 0 .9-1.5L18 12.6V9a6 6 0 0 0-6-6Zm-2.4 15.5a2.5 2.5 0 0 0 4.8 0Z"/></svg>',
+  child: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 2.5h8A2.5 2.5 0 0 1 18.5 5v14a2.5 2.5 0 0 1-2.5 2.5H8A2.5 2.5 0 0 1 5.5 19V5A2.5 2.5 0 0 1 8 2.5Zm0 2a.5.5 0 0 0-.5.5v14a.5.5 0 0 0 .5.5h8a.5.5 0 0 0 .5-.5V5a.5.5 0 0 0-.5-.5Zm4 12a1.25 1.25 0 1 1 0 2.5 1.25 1.25 0 0 1 0-2.5Z"/></svg>',
+  settings: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10.3 2h3.4l.5 2.6c.6.2 1.2.5 1.7.9l2.5-.9 1.7 2.9-2 1.8a7 7 0 0 1 0 1.9l2 1.8-1.7 2.9-2.5-.9c-.5.4-1.1.7-1.7.9l-.5 2.6h-3.4l-.5-2.6c-.6-.2-1.2-.5-1.7-.9l-2.5.9-1.7-2.9 2-1.8a7 7 0 0 1 0-1.9l-2-1.8 1.7-2.9 2.5.9c.5-.4 1.1-.7 1.7-.9ZM12 8.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7Z"/></svg>',
+};
+function tabBar(current) {
+  const tab = (key, route, label) => {
+    const ico = h('span', { class: 'tab-ico' }); ico.innerHTML = TAB_ICONS[key]; // fixed SVG written here, no data
+    const badge = key === 'alerts' && activeCount() ? h('span', { class: 'badge' }, String(activeCount())) : null;
+    return h('button', { class: 'tab' + (current === key ? ' on' : ''), 'aria-current': current === key ? 'page' : null, onclick: () => go(route) }, ico, badge, h('span', {}, label));
+  };
+  return h('nav', { class: 'tabbar', 'aria-label': 'Menu' }, tab('alerts', '', 'Avvisi'), tab('child', 'child', 'Figlio'), tab('settings', 'settings', 'Impostazioni'));
+}
+const activeCount = () => S.alerts.filter(a => !a.archived).length + S.reports.size;
 
 function render() {
   const app = document.getElementById('app');
@@ -500,7 +515,10 @@ function page(r) {
   if (name === 'pair') return pairPage();
   if (name === 'notify') return notifyPage();
   if (name === 'pin') return pinPage('Cambia PIN', 'Nuovo PIN, almeno 6 cifre.', true, true);
-  return homePage();
+  if (name === 'advanced') return advancedPage();
+  if (name === 'child') return [...childPage(), tabBar('child')];
+  if (name === 'settings') return [...settingsPage(), tabBar('settings')];
+  return [...homePage(), tabBar('alerts')];
 }
 
 function pinPage(title, sub, choosing, change) {
@@ -560,9 +578,9 @@ function pinPage(title, sub, choosing, change) {
   if (bio && S.bioAuto) { S.bioAuto = false; setTimeout(() => bioUnlock(false), 300); }
   else setTimeout(() => input.focus(), 50);
   return [h('div', { class: 'lock' },
-    change ? header(title, true) : h('div', { class: 'head' }, shield(), titleEl(title)),
+    change ? header(title, 'settings') : h('div', { class: 'head' }, shield(), titleEl(title)),
     h('p', { class: 'sub' }, sub), input, again, err, btn, bio,
-    change ? null : h('p', { class: 'caption center' }, 'Il PIN resta solo su questo telefono (PBKDF2). Se lo dimentichi: abbina di nuovo.'))];
+    change ? null : h('p', { class: 'caption center' }, 'Il PIN resta solo su questo telefono. Se lo dimentichi, dovrai collegare di nuovo il telefono di tuo figlio.'))];
 }
 
 /** After the PIN or Face ID: the saved copy (if this unlock could open it) is loaded once, then the mailbox. */
@@ -621,69 +639,133 @@ async function toggleBio() {
   }
 }
 
-function statusCard() {
+/** Plain-language state of the child's phone: { cls, title, line } (no technical words). */
+function childState() {
   const now = Date.now();
-  let cls = '', title, line, action = 'Abbinamento e codice di verifica';
-  if (!S.pair) { title = 'Non abbinato'; line = 'Abbina il telefono di tuo figlio con un codice.'; action = 'Abbina'; }
-  else if (!S.child) { title = 'In attesa del telefono di tuo figlio'; line = 'Incolla il codice in Phylax sul suo telefono › Telefono del genitore.'; }
-  else if (S.loaded && now - S.lastSeen > SILENT_MS) { cls = 'broken'; title = 'Non risponde da più di 1 ora'; line = 'Può essere spento, senza rete, o l\'app è stata fermata o disinstallata.'; }
-  else if (!S.state) { title = 'Abbinato'; line = S.loaded ? 'Nessun messaggio nelle ultime ore.' : 'Lettura degli avvisi cifrati…'; }
-  else {
-    if (S.state === 'INTERRUPTED') { cls = 'broken'; title = 'Protezione interrotta'; }
-    else if (S.state === 'STOPPED') { cls = 'idle'; title = 'Protezione fermata'; }
-    else title = 'Protezione attiva';
-    line = (S.detail ? S.detail + ' · ' : '') + 'ultimo contatto ' + ago(now - S.lastSeen);
+  if (!S.pair) return { cls: 'idle', title: 'Telefono non collegato', line: 'Collega il telefono di tuo figlio per ricevere gli avvisi.' };
+  if (!S.child) return { cls: 'idle', title: 'In attesa del telefono di tuo figlio', line: 'Fai inquadrare il QR dal suo telefono per finire il collegamento.' };
+  if (S.loaded && now - S.lastSeen > SILENT_MS) return { cls: 'broken', title: 'Non risponde da più di 1 ora', line: 'Può essere spento o senza rete, oppure l\'app è stata fermata o tolta.' };
+  if (!S.state) return { cls: '', title: 'Collegato', line: S.loaded ? 'Nessuna notizia nelle ultime ore.' : 'Sto leggendo gli avvisi…' };
+  const last = 'ultimo contatto ' + ago(now - S.lastSeen);
+  if (S.state === 'INTERRUPTED') return { cls: 'broken', title: 'Protezione interrotta', line: (S.detail ? S.detail + ' · ' : '') + last };
+  if (S.state === 'STOPPED') return { cls: 'idle', title: 'Protezione in pausa', line: (S.detail ? S.detail + ' · ' : '') + last };
+  return { cls: '', title: 'Protezione attiva', line: (S.detail ? S.detail + ' · ' : '') + last };
+}
+
+/** Home summary: "Tutto ok" or "N avvisi da guardare", with the owl. */
+function summaryCard() {
+  const st = childState(), n = activeCount();
+  const urgent = S.alerts.some(a => !a.archived && a.high);
+  let cls, title, line, btn = null;
+  if (!S.pair || !S.child) {
+    cls = 'idle'; title = !S.pair ? 'Iniziamo' : 'Quasi fatto'; line = st.line;
+    btn = h('button', { class: 'btn white', onclick: () => go('pair') }, !S.pair ? 'Abbina' : 'Mostra il QR');
+  } else if (n) {
+    cls = urgent ? 'urgent' : 'look';
+    title = n === 1 ? '1 avviso da guardare' : n + ' avvisi da guardare';
+    line = urgent ? 'C\'è almeno un avviso urgente: guardalo appena puoi.' : 'Guardali con calma quando hai un momento.';
+  } else if (st.cls === 'broken') {
+    cls = 'broken'; title = st.title; line = st.line;
+    btn = h('button', { class: 'btn white', onclick: () => go('child') }, 'Cosa fare');
+  } else {
+    cls = ''; title = 'Tutto ok'; line = S.loaded || S.state ? 'Nessun avviso nuovo. ' + (S.lastSeen ? 'Ultimo contatto: ' + ago(Date.now() - S.lastSeen) + '.' : '') : 'Sto controllando se ci sono avvisi…';
   }
-  return h('div', { class: 'status ' + cls },
-    h('h2', {}, title), h('p', {}, line),
-    h('button', { class: 'btn white', onclick: () => go('pair') }, action));
+  return h('div', { class: 'status hero ' + cls },
+    h('img', { class: 'hero-owl', src: 'icons/mark.svg', alt: '' }),
+    h('div', { class: 'hero-txt' }, h('h2', {}, title), h('p', {}, line)), btn);
 }
 
 function homePage() {
-  const out = [header('Phylax Genitore'), h('p', { class: 'sub' }, 'Avvisi cifrati dal telefono di tuo figlio.'), statusCard()];
-  if (S.pair) {
-    out.push(h('p', { class: 'caption' }, h('span', { class: 'dot' + (S.online ? ' on' : '') }),
-      S.online ? 'In ascolto (casella cifrata)' : S.loaded ? 'Non collegato: nuovo tentativo…' : 'Collegamento alla casella…', S.error ? ' · ' + S.error : ''));
-  }
-  out.push(h('div', { class: 'section' }, 'Segnalazioni aperte'));
+  const out = [header('Phylax Genitore'), summaryCard()];
+  if (S.pair && !S.online && S.loaded) out.push(h('p', { class: 'caption' }, h('span', { class: 'dot' }), 'Senza collegamento a internet: riprovo da solo…'));
   const reports = [...S.reports.values()];
-  if (!reports.length) out.push(h('p', { class: 'caption' }, 'Nessuna segnalazione aperta.'));
-  for (const r of reports) {
-    out.push(h('div', { class: 'card row', role: 'button', tabindex: '0', onclick: () => go('report/' + r.id) },
-      h('div', { class: 'ico' }, '✉'),
-      h('div', { class: 'txt' }, h('div', { class: 't' }, r.reason + ' · ' + r.app),
-        h('div', { class: 's' }, r.fragments.length + ' messaggi · aperta alle ' + hm(r.opened))),
-      h('div', { class: 'chev' }, '›')));
+  if (reports.length) {
+    out.push(h('div', { class: 'section' }, 'Chat da controllare'));
+    for (const r of reports) {
+      out.push(h('div', { class: 'card row', role: 'button', tabindex: '0', onclick: () => go('report/' + r.id) },
+        h('div', { class: 'ico warn' }, '!'),
+        h('div', { class: 'txt' }, h('div', { class: 't' }, r.reason + ' · ' + r.app),
+          h('div', { class: 's' }, r.fragments.length + (r.fragments.length === 1 ? ' messaggio' : ' messaggi') + ' · dalle ' + hm(r.opened))),
+        h('div', { class: 'chev' }, '›')));
+    }
   }
-  out.push(h('div', { class: 'section' }, 'Avvisi'));
   const active = S.alerts.filter(a => !a.archived), archived = S.alerts.filter(a => a.archived);
-  if (!active.length) out.push(h('div', { class: 'card empty' }, h('b', {}, 'Nessun avviso.'), 'Gli avvisi arrivano cifrati e restano salvati, cifrati, solo su questo telefono.'));
+  if (S.pair) out.push(h('div', { class: 'section' }, 'Avvisi'));
+  if (S.pair && !active.length) out.push(h('div', { class: 'card empty' }, h('img', { class: 'empty-owl', src: 'icons/mark.svg', alt: '' }),
+    h('b', {}, 'Nessun avviso da guardare'), 'Se succede qualcosa ti avvisiamo noi. Gli avvisi restano solo su questo telefono, protetti dal PIN.'));
   for (const a of active) out.push(alertCard(a, false));
   if (archived.length) {
     out.push(h('button', { class: 'toggle', 'aria-expanded': String(S.showArchived), onclick: () => { S.showArchived = !S.showArchived; render(); } },
       'Archiviati (' + archived.length + ') ' + (S.showArchived ? '▴' : '▾')));
     if (S.showArchived) for (const a of archived) out.push(alertCard(a, true));
   }
-  out.push(h('div', { class: 'section' }, 'Notifiche'));
-  out.push(navRow('🔔', 'Notifiche', pushLine(), () => go('notify'), true));
-  out.push(h('div', { class: 'section' }, 'Sicurezza'));
-  out.push(navRow('#', 'Cambia PIN', 'Serve il PIN attuale (già inserito)', () => go('pin')));
-  if (S.bio || S.bioAvailable) {
-    out.push(navRow('☺', 'Sblocca con Face ID', S.bio ? 'Attivo · tocca per disattivarlo · il PIN resta valido'
-      : 'Disattivo · tocca per attivarlo · il PIN resta sempre valido', toggleBio));
-  }
-  out.push(navRow('🔒', 'Blocca ora', S.bio ? 'Chiede Face ID o il PIN' : 'Chiede di nuovo il PIN', () => { S.unlocked = false; render(); }));
-  out.push(h('p', { class: 'caption center' }, 'Versione web ' + VERSION + ' · consegna tramite '
-    + 'la nostra casella cifrata (Cloudflare, tiene i messaggi 7 giorni)'
-    + ', solo testo cifrato · qui restano salvati cifrati (chiave protetta dal PIN o da Face ID) · solo prove con messaggi inventati [TUTELA-TEST]'));
   return out;
 }
+
+function childPage() {
+  const st = childState();
+  const out = [header('Figlio'), h('div', { class: 'status ' + st.cls }, h('h2', {}, st.title), h('p', {}, st.line),
+    h('button', { class: 'btn white', onclick: () => go('pair') }, !S.pair ? 'Abbina' : !S.child ? 'Mostra il QR' : 'Collegamento e codice di verifica'))];
+  if (st.cls === 'broken') {
+    out.push(h('div', { class: 'card' }, h('p', { class: 'card-head' }, 'Cosa fare'),
+      h('ol', { class: 'steps' },
+        h('li', {}, 'Controlla che il telefono di tuo figlio sia acceso e abbia internet.'),
+        h('li', {}, 'Apri Phylax sul suo telefono: deve dire «Protezione attiva».'),
+        h('li', {}, 'Se l\'app non c\'è più, parlane con lui: era un patto fatto insieme.'))));
+  }
+  out.push(h('div', { class: 'section' }, 'Cosa fa Phylax'));
+  out.push(h('div', { class: 'card' },
+    h('ul', { class: 'plain' },
+      h('li', {}, 'Legge le chat solo sul telefono di tuo figlio, e solo per cercare segnali di pericolo.'),
+      h('li', {}, 'A te arriva solo l\'avviso con un breve pezzo di testo, mai tutte le chat.'),
+      h('li', {}, 'Le foto non arrivano mai: al massimo un avviso che ce n\'è una a rischio.'),
+      h('li', {}, 'Foto o vocali «visualizza una volta»: ti segnala solo che è successo, non cosa contengono.'))));
+  return out;
+}
+
+function settingsPage() {
+  const out = [header('Impostazioni')];
+  out.push(h('div', { class: 'section' }, 'Avvisi'));
+  out.push(navRow('🔔', 'Notifiche', pushLine(), () => go('notify'), true));
+  out.push(h('div', { class: 'section' }, 'Sicurezza'));
+  out.push(navRow('#', 'Cambia PIN', 'Il PIN che apre questa app', () => go('pin')));
+  if (S.bio || S.bioAvailable) {
+    out.push(navRow('☺', 'Sblocca con Face ID', S.bio ? 'Attivo · tocca per spegnerlo' : 'Spento · tocca per attivarlo', toggleBio));
+  }
+  out.push(navRow('🔒', 'Blocca ora', S.bio ? 'Chiede Face ID o il PIN' : 'Chiede di nuovo il PIN', () => { S.unlocked = false; render(); }));
+  out.push(h('div', { class: 'section' }, 'Altro'));
+  out.push(navRow('📱', 'Telefono di tuo figlio', 'Collegamento e codice di verifica', () => go('pair')));
+  out.push(navRow('ⓘ', 'Avanzate e informazioni', 'Versione, collegamento, privacy', () => go('advanced')));
+  return out;
+}
+
+/** 0.21: everything technical lives here, out of the main screens. */
+function advancedPage() {
+  const out = [header('Avanzate', 'settings')];
+  const conn = !S.pair ? 'Non abbinato' : S.online ? 'In ascolto (casella cifrata)' : S.loaded ? 'Non collegato: nuovo tentativo…' : 'Collegamento alla casella…';
+  out.push(h('div', { class: 'card' },
+    h('p', { class: 'card-head' }, 'Collegamento'),
+    h('p', {}, h('span', { class: 'dot' + (S.online ? ' on' : '') }), conn, S.error ? ' · ' + S.error : ''),
+    h('p', { class: 'caption' }, 'Gli avvisi passano dalla nostra casella cifrata (Cloudflare), che tiene solo testo cifrato per 7 giorni. Qui restano salvati cifrati, con la chiave protetta dal PIN o da Face ID.')));
+  out.push(h('div', { class: 'card' },
+    h('p', { class: 'card-head' }, 'Informazioni'),
+    h('p', {}, 'Versione web ' + VERSION),
+    h('p', { class: 'caption' }, 'PIN: PBKDF2-SHA256 sul telefono. Avvisi: cifratura punto a punto (ECDH P-256, AES-GCM). Notifiche: testo fisso, senza contenuto.'),
+    h('p', { class: 'caption' }, 'Carattere del logo: Baloo 2 (SIL Open Font License). Solo prove con messaggi inventati [TUTELA-TEST].')));
+  return out;
+}
+
 function alertCard(a, archived) {
-  return h('div', { class: 'card alert' + (archived ? ' archived' : '') },
-    h('div', { class: 'alert-top' }, h('span', { class: 'chip ' + (a.high ? 'danger' : a.doubt ? 'doubt' : 'warning') }, a.high ? 'Rischio alto' : a.doubt ? 'Dubbio · da guardare' : 'Da verificare'),
-      h('span', { class: 'time' }, hm(a.time))),
+  const level = a.high ? ['danger', 'Urgente'] : a.doubt ? ['doubt', 'Dubbio'] : ['warning', 'Da guardare'];
+  const note = a.category === 'Possibile foto intima'
+    ? '📷 L\'immagine resta sul telefono di tuo figlio e non viene mai inviata. Non chiedere di vederla o di inoltrartela.'
+    : /visualizzazione singola/i.test(a.category)
+      ? '👁 Phylax vede solo che c\'è stato un contenuto che si apre una volta, non cosa contiene. Parlane con calma: a volte è uno scherzo, a volte una pressione.'
+      : /vocali/i.test(a.category) ? '🎙 Phylax non ascolta i vocali: conta solo quanti ne arrivano di notte.' : null;
+  return h('div', { class: 'card alert ' + level[0] + (archived ? ' archived' : '') },
+    h('div', { class: 'alert-top' }, h('span', { class: 'chip ' + level[0] }, level[1]), h('span', { class: 'time' }, hm(a.time))),
     h('h3', {}, a.category), h('p', { class: 'meta' }, a.app), h('div', { class: 'quote' }, a.text),
-    a.category === 'Possibile foto intima' ? h('p', { class: 'caption' }, '📷 Solo testo: l\'immagine resta sul telefono di tuo figlio e non viene mai inviata. Non chiedere di vederla o di inoltrartela.') : null,
+    note ? h('p', { class: 'caption' }, note) : null,
     h('button', { class: 'link', onclick: () => { setArchived(a, !archived); toast(archived ? 'Rimesso tra gli avvisi' : 'Avviso archiviato'); render(); } },
       archived ? 'Rimetti tra gli avvisi' : 'Archivia'));
 }
@@ -696,7 +778,7 @@ function navRow(icon, title, sub, onclick, indigo) {
 
 function reportPage(id) {
   const r = S.reports.get(id);
-  const out = [header('Segnalazione aperta', true), h('p', { class: 'sub' }, 'Solo questa chat, solo dall\'avviso in poi.')];
+  const out = [header('Chat da controllare', true), h('p', { class: 'sub' }, 'Vedi solo questa chat, e solo dall\'avviso in poi.')];
   if (!r) { out.push(h('div', { class: 'card empty' }, h('b', {}, 'Segnalazione chiusa o non più disponibile.'))); return out; }
   out.push(h('div', { class: 'card' },
     h('h3', { class: 'card-title' }, r.reason),
@@ -706,12 +788,12 @@ function reportPage(id) {
   out.push(h('button', { class: 'btn outline', onclick: e => { e.target.disabled = true; closeReport(id, L.OUTCOME_OK); } }, language ? 'Questa lingua va bene · chiudi e cancella' : 'Tutto ok · chiudi e cancella'));
   if (language) out.push(h('p', { class: 'caption' }, 'Per questa chat Phylax non avviserà più solo per la lingua; le parole a rischio continuano a far partire gli avvisi.'));
   out.push(h('button', { class: 'btn primary', onclick: e => { e.target.disabled = true; closeReport(id, L.OUTCOME_INTERVENE); } }, 'Intervengo · chiudi e cancella'));
-  out.push(h('p', { class: 'caption' }, 'Chiudere cancella la segnalazione qui e, al prossimo controllo (entro circa 30 secondi), anche sul telefono di tuo figlio.'));
+  out.push(h('p', { class: 'caption' }, 'Chiudendo, questi messaggi si cancellano qui e, entro circa 30 secondi, anche sul telefono di tuo figlio.'));
   return out;
 }
 
 function pairPage() {
-  const out = [header('Abbinamento', true)];
+  const out = [header('Collegamento', S.pair ? 'child' : true)];
   if (!S.pair) {
     out.push(h('p', { class: 'sub' }, 'Crea un codice e incollalo sul telefono di tuo figlio.'));
     out.push(h('div', { class: 'card' },
@@ -742,7 +824,7 @@ function pairPage() {
       h('p', { class: 'caption' }, 'Sul suo telefono: Phylax › PIN › Telefono del genitore › «Fotografa il QR». Poi tocca «Abbina questo telefono».')));
   }
   out.push(h('div', { class: 'card' },
-    h('p', { class: 'meta' }, 'Codice di abbinamento (contiene solo la chiave pubblica e i due topic)'),
+    h('p', { class: 'meta' }, S.child ? 'Codice di collegamento' : 'Se non riesci a usare il QR, copia questo codice'),
     box,
     h('div', { class: 'gap' }),
     h('button', { class: 'btn primary', onclick: () => copy(S.pair.code, 'Codice') }, 'Copia'),
@@ -767,7 +849,7 @@ function pushLine() {
   return 'Spente: tocca qui per attivarle';
 }
 function notifyPage() {
-  const out = [header('Notifiche', true),
+  const out = [header('Notifiche', 'settings'),
     h('p', { class: 'sub' }, 'Il telefono di tuo figlio fa suonare questo iPhone. La notifica dice solo «Nuovo avviso da Phylax: apri l\'app»: il contenuto lo vedi solo qui, con il PIN.')];
   if (!pushSupported() || !standalone()) {
     out.push(h('div', { class: 'card' },
@@ -791,7 +873,7 @@ function notifyPage() {
       : h('button', { class: 'btn ghost', onclick: () => { resendPush(true); toast('Richiesta inviata'); render(); } }, 'Invia di nuovo al telefono di tuo figlio')));
   out.push(h('div', { class: 'card' },
     h('p', { class: 'card-head' }, 'Privacy'),
-    h('p', { class: 'caption' }, 'Le notifiche non passano dalla nostra casella e non serve un account. Il servizio notifiche di Apple riceve solo una notifica cifrata con un testo fisso, senza nomi, chat o categorie. L\'indirizzo delle notifiche passa al telefono di tuo figlio solo cifrato.')));
+    h('p', { class: 'caption' }, 'Non serve un account. Apple riceve solo una notifica cifrata con un testo fisso, senza nomi, chat o categorie.')));
   return out;
 }
 
