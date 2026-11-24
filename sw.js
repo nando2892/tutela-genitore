@@ -1,5 +1,5 @@
-// Offline app shell only. Never caches ntfy.sh (alerts are rebuilt from the ciphertext at each opening).
-const CACHE = 'phylax-genitore-0.16';
+// Offline app shell only. Never caches the mailbox (alerts are rebuilt from the ciphertext at each opening).
+const CACHE = 'phylax-genitore-0.17';
 const SHELL = ['./', 'index.html', 'style.css', 'app.js', 'link.js', 'bio.js', 'qr.js', 'manifest.json',
   'icons/icon.svg', 'icons/shield.svg', 'icons/icon-192.png', 'icons/icon-512.png', 'icons/apple-touch-icon.png'];
 
@@ -12,7 +12,7 @@ self.addEventListener('activate', e => {
 });
 self.addEventListener('fetch', e => {
   const url = new URL(e.request.url);
-  if (e.request.method !== 'GET' || url.origin !== self.location.origin) return; // ntfy: straight to the network
+  if (e.request.method !== 'GET' || url.origin !== self.location.origin) return; // the mailbox: straight to the network
   // Network first, revalidating with the server (updates arrive at once), cache when offline.
   e.respondWith(fetch(e.request, { cache: 'no-cache' }).then(r => {
     if (r.ok) { const copy = r.clone(); caches.open(CACHE).then(c => c.put(e.request, copy)); }

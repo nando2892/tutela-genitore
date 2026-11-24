@@ -2,13 +2,13 @@
 // Stores on this device ONLY: the key pair (private key not extractable), topics, counters, PIN hash,
 // last contact time. Since 0.15 also alerts, archive, reports and status, ENCRYPTED (AES-256-GCM) with a
 // random data key that is itself stored only wrapped by a key derived from the PIN (PBKDF2, never the PIN
-// itself) and, if Face ID is on, by a non-extractable key of this browser. At every opening what ntfy.sh
-// still keeps (about 12 hours, ciphertext only) is read again; already-seen messages are skipped by counter.
+// itself) and, if Face ID is on, by a non-extractable key of this browser. At every opening what our mailbox
+// still keeps (7 days, ciphertext only) is read again; already-seen messages are skipped by counter (0.17: no ntfy.sh).
 import * as L from './link.js';
 import * as Bio from './bio.js';
 import * as QR from './qr.js';
 
-const VERSION = '0.16';
+const VERSION = '0.17';
 const SILENT_MS = 60 * 60 * 1000;            // like LinkPolicy: warning after 1 hour without messages
 const MAX_AGE_S = 24 * 60 * 60;              // reject messages published > 24 h after they were written (replays)
 const LOCK_AFTER_MS = 5 * 60 * 1000;         // PIN again after 5 minutes in the background
@@ -49,13 +49,12 @@ const S = {
   bio: null, bioAvailable: false, bioAuto: true, bioBusy: false, // Face ID (WebAuthn passkey), 0.10.4
   sent: 0, seenMax: 0, lastSeenSaved: 0,
   alerts: [], reports: new Map(), state: null, detail: '', lastSeen: 0, lastStatus: 0,
-  lastId: 'all', lastC2P: 0, lastP2C: 0,
+  lastC2P: 0, lastP2C: 0,
   online: false, loaded: false, error: '', outbox: [], outboxWait: 5000,
   showCode: true, archived: new Map(), showArchived: false,
   pushState: null, subscribed: false, pushSentEndpoint: null, pushError: '',
   dk: null, dkRaw: null, ready: false, // 0.15: data key once unlocked; ready = saved copy loaded, may connect
 };
-let streamCtrl = null, reconnectTimer = null, lastActivity = 0, queue = Promise.resolve();
 
 // ---------- Small helpers ----------
 function h(tag, attrs, ...kids) {
@@ -166,7 +165,7 @@ const Vault = (() => {
         lastStatus: S.lastStatus, lastSeen: S.lastSeen, lastC2P: S.lastC2P, lastP2C: S.lastP2C };
       await db.set('vault', await seal(S.dk, enc.encode(JSON.stringify(snap)), AAD));
     },
-    /** Puts the saved copy into S. Counters come with it, so the ntfy backlog does not add the same messages twice. */
+    /** Puts the saved copy into S. Counters come with it, so re-reading the mailbox does not add the same messages twice. */
     async load() {
       const box = S.dk && await db.get('vault');
       if (!box) return false;
@@ -216,7 +215,7 @@ function closeLocally(id) {
 
 function resetData() {
   S.alerts = []; S.reports = new Map(); S.state = null; S.detail = ''; S.lastStatus = 0;
-  S.lastId = 'all'; S.lastC2P = 0; S.lastP2C = 0;
+  S.lastC2P = 0; S.lastP2C = 0;
 }
 function apply(m, receivedAt) {
   S.lastSeen = Math.max(S.lastSeen, receivedAt);
@@ -258,9 +257,8 @@ async function ensureKeys() {
   return true;
 }
 
-/** One ntfy message. Foreign, altered, replayed, too old: ignored. `live` = arrived now (not the backlog). */
+/** One mailbox message. Foreign, altered, replayed, too old: ignored. `live` = arrived now (not the first read). */
 async function handle(ev, live) {
-  if (ev.id) S.lastId = ev.id;
   let hd;
   try { hd = L.peek(ev.message); } catch { return; }
   try {
@@ -310,63 +308,44 @@ function announce(what, m) {
   }
 }
 
-// ---------- 0.16: our mailbox (kept 7 days), read next to the ntfy stream ----------
-let mboxBusy = false, mboxLast = 0;
-/** Runs inside enqueue() (never calls it): messages after the saved position, through the same handle(). */
-async function pollMailbox(freshMs = 0) {
-  if (!L.MAILBOX || !S.pair || !S.ready || mboxBusy) return;
-  if (freshMs && Date.now() - mboxLast < freshMs) return;
-  mboxBusy = true; mboxLast = Date.now();
+// ---------- 0.17: our mailbox (kept 7 days) is the only path; ntfy.sh is no longer used ----------
+let mboxBusy = false, fromStart = true, queue = Promise.resolve();
+function enqueue(fn) { queue = queue.then(fn, fn); return queue; }
+/**
+ * Runs inside enqueue(). Reads both mailboxes of the pair (the child's messages and our own closures, also those
+ * sent from another device) after the last position, oldest first, through handle(). The first read after an
+ * opening starts from the beginning (7 days): the counters skip what the saved copy already has, and without a
+ * readable saved copy the state is rebuilt from the mailbox.
+ */
+async function pollMailbox() {
+  if (!S.pair || !S.ready || mboxBusy) return;
+  mboxBusy = true;
   const topic = S.pair.topic;
   try {
-    const box = await L.mailboxName(topic, 'c2p');
-    for (let page = 0; page < 20; page++) {
-      const r = await L.mailboxPoll(box, S.mboxSince || 0);
-      if (!S.pair || S.pair.topic !== topic) return; // new pairing meanwhile
-      for (const m of r.messages) await handle({ id: null, time: Math.floor(m.t / 1000), message: m.msg }, S.loaded);
-      if (r.next !== S.mboxSince) { S.mboxSince = r.next; db.set('mboxSince', S.mboxSince).catch(() => {}); }
-      if (r.messages.length < 100) break;
+    const boxes = [await L.mailboxName(topic, 'c2p'), await L.mailboxName(topic, 'p2c')];
+    const since = fromStart ? [0, 0] : [S.mboxSince || 0, S.mboxSinceP2c || 0];
+    const got = [];
+    for (let b = 0; b < 2; b++) {
+      for (let page = 0; page < 10; page++) {
+        const r = await L.mailboxPoll(boxes[b], since[b]);
+        for (const m of r.messages) got.push(m);
+        since[b] = r.next;
+        if (r.messages.length < 100) break;
+      }
     }
-    S.mboxOk = true;
-  } catch { S.mboxOk = false; } finally { mboxBusy = false; }
+    if (!S.pair || S.pair.topic !== topic) return; // new pairing meanwhile
+    got.sort((x, y) => x.t - y.t || x.id - y.id);
+    for (const m of got) await handle({ time: Math.floor(m.t / 1000), message: m.msg }, S.loaded);
+    S.mboxSince = since[0]; S.mboxSinceP2c = since[1];
+    fromStart = false; S.loaded = true;
+    S.online = true; if (S.error === MBOX_DOWN) S.error = '';
+  } catch { S.online = false; S.error = MBOX_DOWN; } finally { mboxBusy = false; }
   scheduleRender();
 }
-setInterval(() => { if (L.MAILBOX && S.ready && document.visibilityState === 'visible') enqueue(() => pollMailbox()); }, 15000);
-
-// ---------- ntfy connection ----------
-function enqueue(fn) { queue = queue.then(fn, fn); return queue; }
-async function connect() {
-  if (!S.pair || streamCtrl || !S.ready) return; // 0.15: never before the saved copy is loaded
-  clearTimeout(reconnectTimer);
-  const ctrl = streamCtrl = new AbortController();
-  try {
-    await enqueue(() => pollMailbox()); // 0.16: the mailbox first (it keeps 7 days), then ntfy
-    if (!S.loaded) {
-      // Backlog first (rebuilds the state), then the live stream from the last id.
-      const backlog = await L.poll(S.pair.topic, 'all');
-      for (const ev of backlog) await enqueue(() => handle(ev, false));
-      S.loaded = true;
-    }
-    S.online = true; S.error = ''; scheduleRender();
-    await L.stream(S.pair.topic, S.lastId, ev => enqueue(async () => {
-      await pollMailbox(3000); // older messages that only reached the mailbox come first (counters only go up)
-      await handle(ev, true);
-    }), ctrl.signal, () => { lastActivity = Date.now(); });
-  } catch (e) {
-    if (!ctrl.signal.aborted) S.error = 'Connessione a ntfy non riuscita: nuovo tentativo tra poco.';
-  }
-  if (streamCtrl === ctrl) {
-    streamCtrl = null; S.online = false; scheduleRender();
-    if (!ctrl.signal.aborted || ctrl.reconnect) reconnectTimer = setTimeout(connect, ctrl.reconnect ? 0 : 5000);
-  }
-}
-function disconnect(reconnect) {
-  if (!streamCtrl) { if (reconnect) connect(); return; }
-  streamCtrl.reconnect = reconnect;
-  streamCtrl.abort();
-}
-// ntfy keepalive ~45 s: nothing for 100 s (e.g. iPhone back from the background) means a dead stream.
-setInterval(() => { if (streamCtrl && S.online && Date.now() - lastActivity > 100000) disconnect(true); scheduleRender(); }, 30000);
+const MBOX_DOWN = 'Casella non raggiungibile: nuovo tentativo tra poco.';
+function connect() { if (S.pair && S.ready) enqueue(() => pollMailbox()); }
+// Every 15 s while the app is on screen (in the background the iPhone wakes it by Web Push, straight from the child).
+setInterval(() => { if (document.visibilityState === 'visible') connect(); scheduleRender(); }, 15000);
 
 async function closeReport(id, outcome) {
   if (!await ensureKeys()) return;
@@ -387,12 +366,9 @@ async function drain() {
   draining = true;
   while (S.outbox.length) {
     try {
-      // 0.16: to the mailbox and to ntfy; sent if one took it (the child drops a duplicate by its counter).
-      let ok = false;
-      if (L.MAILBOX && await ensureKeys()) {
-        try { await L.mailboxPost(await L.mailboxName(S.pair.topic, 'p2c'), S.keys.mailboxAuth, S.outbox[0]); ok = true; } catch { /* ntfy below */ }
-      }
-      try { await L.publish(S.pair.topic, S.outbox[0]); ok = true; } catch (e) { if (!ok) throw e; }
+      // 0.17: to the child's mailbox only (ntfy.sh is no longer used).
+      if (!await ensureKeys()) break;
+      await L.mailboxPost(await L.mailboxName(S.pair.topic, 'p2c'), S.keys.mailboxAuth, S.outbox[0]);
       S.outbox.shift(); S.outboxWait = 5000; await db.set('outbox', S.outbox);
     }
     catch {
@@ -476,16 +452,16 @@ async function newPairing() {
   const kp = await L.newKeyPair();
   const topic = L.newTopic();
   const pub = await L.spki(kp.publicKey);
-  // v1 code: no separate ntfy notification topic any more, notifications come by Web Push (0.10.3).
+  // v1 code: no separate notification topic any more, notifications come by Web Push (0.10.3).
   S.pair = { topic, notifyTopic: null, priv: kp.privateKey, pub, code: L.pairingCode(topic, pub), created: Date.now() };
   S.child = null; S.keys = null; S.pushState = null; S.pushSentEndpoint = null; S.sent = 0; S.seenMax = 0; S.lastSeen = 0; S.outbox = []; S.loaded = false; S.showCode = true;
   resetData();
   await db.set('pair', S.pair);
   S.archived = new Map();
-  S.mboxSince = 0;
+  S.mboxSince = 0; S.mboxSinceP2c = 0; fromStart = true; S.online = false;
   for (const k of ['child', 'sent', 'seenMax', 'lastSeen', 'outbox', 'archived', 'pushSent', 'pushState', 'vault', 'mboxSince']) await db.del(k);
   clearTimeout(saveTimer);
-  disconnect(true);
+  connect();
 }
 
 // ---------- Rendering ----------
@@ -584,7 +560,7 @@ function pinPage(title, sub, choosing, change) {
     change ? null : h('p', { class: 'caption center' }, 'Il PIN resta solo su questo telefono (PBKDF2). Se lo dimentichi: abbina di nuovo.'))];
 }
 
-/** After the PIN or Face ID: the saved copy (if this unlock could open it) is loaded once, then ntfy. */
+/** After the PIN or Face ID: the saved copy (if this unlock could open it) is loaded once, then the mailbox. */
 async function afterUnlock() {
   if (S.dk && !S.vaultLoaded) {
     S.vaultLoaded = true;
@@ -662,7 +638,7 @@ function homePage() {
   const out = [header('Phylax Genitore'), h('p', { class: 'sub' }, 'Avvisi cifrati dal telefono di tuo figlio.'), statusCard()];
   if (S.pair) {
     out.push(h('p', { class: 'caption' }, h('span', { class: 'dot' + (S.online ? ' on' : '') }),
-      S.online ? (L.MAILBOX ? (S.mboxOk === false ? 'In ascolto (ntfy.sh; casella non raggiungibile)' : 'In ascolto (casella cifrata + ntfy.sh)') : 'In ascolto (ntfy.sh, solo testo cifrato)') : 'Non collegato: riconnessione…', S.error ? ' · ' + S.error : ''));
+      S.online ? 'In ascolto (casella cifrata)' : S.loaded ? 'Non collegato: nuovo tentativo…' : 'Collegamento alla casella…', S.error ? ' · ' + S.error : ''));
   }
   out.push(h('div', { class: 'section' }, 'Segnalazioni aperte'));
   const reports = [...S.reports.values()];
@@ -693,7 +669,7 @@ function homePage() {
   }
   out.push(navRow('🔒', 'Blocca ora', S.bio ? 'Chiede Face ID o il PIN' : 'Chiede di nuovo il PIN', () => { S.unlocked = false; render(); }));
   out.push(h('p', { class: 'caption center' }, 'Versione web ' + VERSION + ' · consegna tramite '
-    + (L.MAILBOX ? 'la nostra casella cifrata (Cloudflare, tiene i messaggi 7 giorni) e ntfy.sh (12 ore)' : 'ntfy.sh (gratuito; sul server restano cifrati per circa 12 ore)')
+    + 'la nostra casella cifrata (Cloudflare, tiene i messaggi 7 giorni)'
     + ', solo testo cifrato · qui restano salvati cifrati (chiave protetta dal PIN o da Face ID) · solo prove con messaggi inventati [TUTELA-TEST]'));
   return out;
 }
@@ -810,7 +786,7 @@ function notifyPage() {
       : h('button', { class: 'btn ghost', onclick: () => { resendPush(true); toast('Richiesta inviata'); render(); } }, 'Invia di nuovo al telefono di tuo figlio')));
   out.push(h('div', { class: 'card' },
     h('p', { class: 'card-head' }, 'Privacy'),
-    h('p', { class: 'caption' }, 'Nessun server nostro e nessun account. Il servizio notifiche di Apple riceve solo una notifica cifrata con un testo fisso, senza nomi, chat o categorie. L\'indirizzo delle notifiche passa al telefono di tuo figlio solo cifrato.')));
+    h('p', { class: 'caption' }, 'Le notifiche non passano dalla nostra casella e non serve un account. Il servizio notifiche di Apple riceve solo una notifica cifrata con un testo fisso, senza nomi, chat o categorie. L\'indirizzo delle notifiche passa al telefono di tuo figlio solo cifrato.')));
   return out;
 }
 
@@ -819,11 +795,11 @@ document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'hidden') { S.hiddenAt = Date.now(); return; }
   if (S.hiddenAt && Date.now() - S.hiddenAt > LOCK_AFTER_MS && S.unlocked) { S.unlocked = false; S.bioAuto = true; }
   try { navigator.clearAppBadge && navigator.clearAppBadge(); } catch { /* not supported */ }
-  if (S.pair && !streamCtrl) connect();
+  connect();
   scheduleRender();
 });
 window.addEventListener('hashchange', () => { render(); window.scrollTo(0, 0); });
-window.addEventListener('online', () => { drain(); if (!streamCtrl) connect(); });
+window.addEventListener('online', () => { drain(); connect(); });
 
 (async function start() {
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
@@ -835,7 +811,6 @@ window.addEventListener('online', () => { drain(); if (!streamCtrl) connect(); }
     S.showCode = !S.child;
     S.sent = await db.get('sent') || 0;
     S.seenMax = await db.get('seenMax') || 0;
-    S.mboxSince = await db.get('mboxSince') || 0;
     S.lastSeen = S.lastSeenSaved = await db.get('lastSeen') || 0;
     S.outbox = await db.get('outbox') || [];
     S.archived = new Map(await db.get('archived') || []);
