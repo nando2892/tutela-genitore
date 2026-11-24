@@ -8,7 +8,7 @@ import * as L from './link.js';
 import * as Bio from './bio.js';
 import * as QR from './qr.js';
 
-const VERSION = '0.21';
+const VERSION = '0.22';
 const SILENT_MS = 60 * 60 * 1000;            // like LinkPolicy: warning after 1 hour without messages
 const MAX_AGE_S = 24 * 60 * 60;              // reject messages published > 24 h after they were written (replays)
 const LOCK_AFTER_MS = 5 * 60 * 1000;         // PIN again after 5 minutes in the background
@@ -54,6 +54,8 @@ const S = {
   showCode: true, archived: new Map(), showArchived: false,
   pushState: null, subscribed: false, pushSentEndpoint: null, pushError: '',
   dk: null, dkRaw: null, ready: false, // 0.15: data key once unlocked; ready = saved copy loaded, may connect
+  // 0.22: screen time. usage = today's minutes from the child; rules = what we last sent; requests = «15 minuti in più?»
+  usage: { day: '', time: 0, apps: [] }, rules: { version: 0, night: null, limits: [], sites: [], allow: [], deny: [] }, requests: [], editRules: null,
 };
 
 // ---------- Small helpers ----------
@@ -162,7 +164,8 @@ const Vault = (() => {
     async save() {
       if (!S.dk) return;
       const snap = { v: 1, alerts: S.alerts, reports: [...S.reports.values()], state: S.state, detail: S.detail,
-        lastStatus: S.lastStatus, lastSeen: S.lastSeen, lastC2P: S.lastC2P, lastP2C: S.lastP2C };
+        lastStatus: S.lastStatus, lastSeen: S.lastSeen, lastC2P: S.lastC2P, lastP2C: S.lastP2C,
+        usage: S.usage, rules: S.rules, requests: S.requests };
       await db.set('vault', await seal(S.dk, enc.encode(JSON.stringify(snap)), AAD));
     },
     /** Puts the saved copy into S. Counters come with it, so re-reading the mailbox does not add the same messages twice. */
@@ -177,6 +180,9 @@ const Vault = (() => {
       S.state = snap.state || null; S.detail = snap.detail || ''; S.lastStatus = snap.lastStatus || 0;
       S.lastSeen = Math.max(S.lastSeen, snap.lastSeen || 0);
       S.lastC2P = snap.lastC2P || 0; S.lastP2C = snap.lastP2C || 0;
+      if (snap.usage) S.usage = snap.usage;
+      if (snap.rules) S.rules = snap.rules;
+      S.requests = snap.requests || [];
       return true;
     },
   };
@@ -216,6 +222,7 @@ function closeLocally(id) {
 function resetData() {
   S.alerts = []; S.reports = new Map(); S.state = null; S.detail = ''; S.lastStatus = 0;
   S.lastC2P = 0; S.lastP2C = 0;
+  S.usage = { day: '', time: 0, apps: [] }; S.rules = { version: 0, night: null, limits: [], sites: [], allow: [], deny: [] }; S.requests = [];
 }
 function apply(m, receivedAt) {
   S.lastSeen = Math.max(S.lastSeen, receivedAt);
@@ -243,6 +250,14 @@ function apply(m, receivedAt) {
       if (!m.heartbeat || m.text) S.detail = m.text;
       return changed || !m.heartbeat ? 'STATUS' : 'NONE';
     }
+    case 'USAGE':
+      if (m.time < S.usage.time) return 'NONE';
+      S.usage = { day: m.text, time: m.time, apps: L.parseUsage(m.fragments) };
+      return 'NONE';
+    case 'EXTRA':
+      if (m.outcome !== L.EXTRA_ASK || !m.text) return 'NONE';
+      S.requests = [{ pkg: m.text, label: m.app, minutes: m.caseId, time: m.time }, ...S.requests.filter(r => r.pkg !== m.text)].slice(0, 20);
+      return 'EXTRA';
     case 'PUSH':
       S.pushState = m.outcome === L.PUSH_ACTIVE ? 'ok' : m.outcome === L.PUSH_EXPIRED ? 'expired' : S.pushState;
       db.set('pushState', S.pushState).catch(() => {});
@@ -291,6 +306,9 @@ async function handle(ev, live) {
       S.lastP2C = header.counter;
       const m = L.decodeMessage(plaintext);
       if (m.type === 'CLOSE_CASE') { closeLocally(m.caseId); saveSoon(); }
+      // 0.22: our own rules and answers (also from another device of the parent).
+      if (m.type === 'RULES' && m.caseId > S.rules.version) { S.rules = L.parseRules(m.caseId, m.fragments); saveSoon(); }
+      if (m.type === 'EXTRA' && m.outcome !== L.EXTRA_ASK) { S.requests = S.requests.filter(r => r.pkg !== m.text); saveSoon(); }
     }
   } catch { /* not ours, altered or replayed */ }
   scheduleRender();
@@ -298,7 +316,7 @@ async function handle(ev, live) {
 
 function announce(what, m) {
   if (what === 'NONE' || what === 'REPORT_UPDATED' && !m.fragments.length) return;
-  const text = what === 'ALERT' ? 'Nuovo avviso' : what === 'REPORT_OPENED' ? 'Segnalazione aperta' :
+  const text = what === 'EXTRA' ? 'Tuo figlio chiede ' + m.caseId + ' minuti in più' : what === 'ALERT' ? 'Nuovo avviso' : what === 'REPORT_OPENED' ? 'Segnalazione aperta' :
     what === 'REPORT_UPDATED' ? 'Nuovo messaggio nella segnalazione' : m.state === 'INTERRUPTED' ? 'Protezione interrotta' : 'Stato aggiornato';
   toast(text);
   try { navigator.setAppBadge && navigator.setAppBadge(); } catch { /* not supported */ }
@@ -347,16 +365,20 @@ function connect() { if (S.pair && S.ready) enqueue(() => pollMailbox()); }
 // Every 15 s while the app is on screen (in the background the iPhone wakes it by Web Push, straight from the child).
 setInterval(() => { if (document.visibilityState === 'visible') connect(); scheduleRender(); }, 15000);
 
-async function closeReport(id, outcome) {
-  if (!await ensureKeys()) return;
+/** Seals one command for the child (p2c), keeps it in the outbox until the mailbox takes it. */
+async function sendToChild(plain) {
+  if (!await ensureKeys()) return false;
   S.sent = L.nextCounter(S.sent, Date.now());
   await db.set('sent', S.sent);
-  const wire = await L.seal(S.keys.p2c, L.P2C, null, S.sent, L.closeMessage(Date.now(), id, outcome));
-  closeLocally(id);
-  saveSoon();
-  S.outbox.push(wire);
+  S.outbox.push(await L.seal(S.keys.p2c, L.P2C, null, S.sent, plain));
   await db.set('outbox', S.outbox);
   drain();
+  return true;
+}
+async function closeReport(id, outcome) {
+  if (!await sendToChild(L.closeMessage(Date.now(), id, outcome))) return;
+  closeLocally(id);
+  saveSoon();
   toast(outcome === L.OUTCOME_OK ? 'Chiusa: tutto ok' : 'Chiusa: intervieni tu');
   go('');
 }
@@ -372,7 +394,7 @@ async function drain() {
       S.outbox.shift(); S.outboxWait = 5000; await db.set('outbox', S.outbox);
     }
     catch {
-      S.error = 'Chiusura non ancora inviata (rete): nuovo tentativo tra ' + Math.round(S.outboxWait / 1000) + ' s.';
+      S.error = 'Comando non ancora inviato (rete): nuovo tentativo tra ' + Math.round(S.outboxWait / 1000) + ' s.';
       setTimeout(drain, S.outboxWait); S.outboxWait = Math.min(S.outboxWait * 2, 300000);
       break;
     }
@@ -496,7 +518,7 @@ function tabBar(current) {
   };
   return h('nav', { class: 'tabbar', 'aria-label': 'Menu' }, tab('alerts', '', 'Avvisi'), tab('child', 'child', 'Figlio'), tab('settings', 'settings', 'Impostazioni'));
 }
-const activeCount = () => S.alerts.filter(a => !a.archived).length + S.reports.size;
+const activeCount = () => S.alerts.filter(a => !a.archived).length + S.reports.size + S.requests.length;
 
 function render() {
   const app = document.getElementById('app');
@@ -516,6 +538,8 @@ function page(r) {
   if (name === 'notify') return notifyPage();
   if (name === 'pin') return pinPage('Cambia PIN', 'Nuovo PIN, almeno 6 cifre.', true, true);
   if (name === 'advanced') return advancedPage();
+  if (name === 'time') return timePage();
+  if (name === 'sites') return sitesPage();
   if (name === 'child') return [...childPage(), tabBar('child')];
   if (name === 'settings') return [...settingsPage(), tabBar('settings')];
   return [...homePage(), tabBar('alerts')];
@@ -678,6 +702,14 @@ function summaryCard() {
 function homePage() {
   const out = [header('Phylax Genitore'), summaryCard()];
   if (S.pair && !S.online && S.loaded) out.push(h('p', { class: 'caption' }, h('span', { class: 'dot' }), 'Senza collegamento a internet: riprovo da solo…'));
+  if (S.requests.length) {
+    out.push(h('div', { class: 'section' }, 'Richieste di tempo'));
+    for (const r of S.requests) out.push(h('div', { class: 'card' },
+      h('h3', { class: 'card-title' }, 'Chiede ' + r.minutes + ' minuti in più per ' + r.label),
+      h('p', { class: 'meta' }, 'Alle ' + hm(r.time) + '. Il tempo deciso per oggi è finito.'),
+      h('button', { class: 'btn primary', onclick: e => { e.target.disabled = true; answerExtra(r, true); } }, 'Sì, ' + r.minutes + ' minuti'),
+      h('button', { class: 'btn ghost', onclick: e => { e.target.disabled = true; answerExtra(r, false); } }, 'No, per oggi basta')));
+  }
   const reports = [...S.reports.values()];
   if (reports.length) {
     out.push(h('div', { class: 'section' }, 'Chat da controllare'));
@@ -713,6 +745,10 @@ function childPage() {
         h('li', {}, 'Apri Phylax sul suo telefono: deve dire «Protezione attiva».'),
         h('li', {}, 'Se l\'app non c\'è più, parlane con lui: era un patto fatto insieme.'))));
   }
+  out.push(h('div', { class: 'section' }, 'Tempo di oggi'));
+  out.push(usageCard());
+  out.push(h('div', { class: 'section' }, 'Siti'));
+  out.push(navRow('🌐', 'Filtro siti', sitesSummary(S.rules), () => { S.editRules = null; go('sites'); }, true));
   out.push(h('div', { class: 'section' }, 'Cosa fa Phylax'));
   out.push(h('div', { class: 'card' },
     h('ul', { class: 'plain' },
@@ -721,6 +757,141 @@ function childPage() {
       h('li', {}, 'Le foto non arrivano mai: al massimo un avviso che ce n\'è una a rischio.'),
       h('li', {}, 'Foto o vocali «visualizza una volta»: ti segnala solo che è successo, non cosa contengono.'))));
   return out;
+}
+
+// ---------- 0.22: screen time ----------
+const today = () => { const d = new Date(); return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()); };
+const hhmm = m => pad(Math.floor(m / 60)) + ':' + pad(m % 60);
+const dur = m => m < 60 ? m + ' min' : m % 60 === 0 ? (m / 60) + ' h' : Math.floor(m / 60) + ' h ' + (m % 60) + ' min';
+const limitLabel = m => m < 0 ? 'Nessun limite' : m === 0 ? 'In pausa tutto il giorno' : dur(m) + ' al giorno';
+const CHOICES = [-1, 15, 30, 45, 60, 90, 120, 180, 0];
+function rulesSummary(r) {
+  const parts = [];
+  if (r.night) parts.push('Notte ' + hhmm(r.night[0]) + '–' + hhmm(r.night[1]));
+  if (r.limits.length) parts.push(r.limits.length + (r.limits.length === 1 ? ' app con limite' : ' app con limite'));
+  return parts.length ? parts.join(' · ') : 'Nessuna regola';
+}
+function usageCard() {
+  const card = h('div', { class: 'card' });
+  const apps = S.usage.day === today() ? S.usage.apps : [];
+  if (!apps.length) {
+    card.append(h('p', {}, 'Ancora nessun dato di oggi.'),
+      h('p', { class: 'caption' }, 'Sul telefono di tuo figlio: Phylax › Configurazione › «Consenti accesso ai dati di utilizzo». I minuti arrivano al massimo una volta all\'ora.'));
+  } else {
+    const total = apps.reduce((n, a) => n + a.minutes, 0), max = Math.max(1, ...apps.map(a => a.minutes));
+    card.append(h('h3', { class: 'card-title' }, 'In tutto ' + dur(total)));
+    for (const a of apps.slice(0, 8)) {
+      const lim = S.rules.limits.find(l => l.pkg === a.pkg);
+      const over = lim && lim.minutes > 0 && a.minutes >= lim.minutes;
+      const bar = h('div', { class: 'bar-fill' + (over ? ' over' : '') });
+      bar.style.width = Math.max(3, Math.round(100 * Math.min(1, a.minutes / max))) + '%';
+      card.append(h('div', { class: 'usage-row' }, h('span', { class: 'u-name' }, a.label),
+        h('span', { class: 'u-min' }, dur(a.minutes) + (lim ? ' · ' + (lim.minutes === 0 ? 'in pausa' : 'limite ' + dur(lim.minutes)) : ''))),
+        h('div', { class: 'bar' }, bar));
+    }
+    card.append(h('p', { class: 'caption' }, 'Aggiornato alle ' + hm(S.usage.time) + '.'));
+  }
+  card.append(h('p', { class: 'caption' }, rulesSummary(S.rules)),
+    h('button', { class: 'btn primary', onclick: () => { S.editRules = null; go('time'); } }, 'Limiti e orario notte'));
+  return card;
+}
+function timePage() {
+  if (!S.editRules) S.editRules = JSON.parse(JSON.stringify(S.rules));
+  const e = S.editRules;
+  const out = [header('Limiti e orario notte', 'child'),
+    h('p', { class: 'sub' }, 'Decidetelo insieme: a tempo finito tuo figlio può chiederti 15 minuti in più.')];
+  out.push(h('div', { class: 'section' }, 'Orario notte'));
+  const start = h('input', { type: 'time', class: 'time-input', value: hhmm(e.night ? e.night[0] : 1320), 'aria-label': 'Inizio notte' });
+  const end = h('input', { type: 'time', class: 'time-input', value: hhmm(e.night ? e.night[1] : 420), 'aria-label': 'Fine notte' });
+  const toMin = v => { const [a, b] = v.split(':').map(Number); return a * 60 + b; };
+  const sync = () => { if (e.night) e.night = [toMin(start.value), toMin(end.value)]; };
+  start.addEventListener('change', sync); end.addEventListener('change', sync);
+  const toggle = h('input', { type: 'checkbox', checked: !!e.night, onchange: ev => { e.night = ev.target.checked ? [toMin(start.value), toMin(end.value)] : null; render(); } });
+  out.push(h('div', { class: 'card' },
+    h('label', { class: 'switch-row' }, toggle, h('span', {}, 'Di notte solo telefono, contatti e sveglia')),
+    e.night ? h('div', { class: 'time-row' }, h('span', {}, 'Dalle'), start, h('span', {}, 'alle'), end) : h('p', { class: 'caption' }, 'Spento')));
+  out.push(h('div', { class: 'section' }, 'Limiti per app'));
+  const known = new Map();
+  const used = new Map();
+  for (const a of S.usage.apps) { known.set(a.pkg, a.label); if (S.usage.day === today()) used.set(a.pkg, a.minutes); }
+  for (const l of e.limits) if (!known.has(l.pkg)) known.set(l.pkg, l.label);
+  if (!known.size) out.push(h('div', { class: 'card empty' }, h('b', {}, 'Ancora nessuna app'), 'Le app compaiono qui quando arrivano i primi minuti di utilizzo dal telefono di tuo figlio.'));
+  for (const [pkg, label] of known) {
+    const lim = e.limits.find(l => l.pkg === pkg);
+    const sel = h('select', { class: 'limit-select', 'aria-label': 'Limite per ' + label, onchange: ev => {
+      const v = Number(ev.target.value);
+      e.limits = e.limits.filter(l => l.pkg !== pkg);
+      if (v >= 0) e.limits.push({ pkg, label, minutes: v });
+    } }, CHOICES.map(c => h('option', { value: String(c), selected: (lim ? lim.minutes : -1) === c }, limitLabel(c))));
+    out.push(h('div', { class: 'card app-limit' }, h('div', {}, h('div', { class: 't' }, label),
+      h('div', { class: 's' }, used.has(pkg) ? 'Oggi ' + dur(used.get(pkg)) : '')), sel));
+  }
+  out.push(h('button', { class: 'btn primary', onclick: async ev => {
+    ev.target.disabled = true;
+    if (await sendRules(e)) { S.editRules = null; toast('Regole inviate: valgono entro circa 30 secondi', 4000); go('child'); }
+    else { ev.target.disabled = false; toast('Prima collega il telefono di tuo figlio'); }
+  } }, 'Salva e manda al telefono di tuo figlio'));
+  out.push(h('p', { class: 'caption' }, 'Telefono, contatti, sveglia e Phylax funzionano sempre, anche di notte, così tuo figlio può sempre chiamarti.'));
+  return out;
+}
+// ---------- 0.23: site filter ----------
+function sitesSummary(r) {
+  const on = L.SITE_CATEGORIES.filter(([c]) => (r.sites || []).includes(c)).map(([, l]) => l);
+  return on.length ? 'Bloccati: ' + on.join(', ').toLowerCase() : (r.deny || []).length ? (r.deny.length + ' siti bloccati da te') : 'Spento · tocca per attivarlo';
+}
+function sitesPage() {
+  if (!S.editRules) {
+    S.editRules = JSON.parse(JSON.stringify(S.rules));
+    if (!S.rules.sitesChosen && !(S.rules.sites || []).length) S.editRules.sites = ['ADULT', 'GAMBLING', 'VIOLENCE']; // first time: suggested
+  }
+  const e = S.editRules;
+  e.sites = e.sites || []; e.allow = e.allow || []; e.deny = e.deny || [];
+  const out = [header('Filtro siti', 'child'),
+    h('p', { class: 'sub' }, 'Nel browser di tuo figlio questi siti mostrano «Sito bloccato». A te arriva un avviso con il nome del sito, una volta al giorno.')];
+  out.push(h('div', { class: 'section' }, 'Categorie'));
+  const cats = h('div', { class: 'card' });
+  for (const [c, label] of L.SITE_CATEGORIES) {
+    cats.append(h('label', { class: 'switch-row cat-row' }, h('input', { type: 'checkbox', checked: e.sites.includes(c),
+      onchange: ev => { e.sites = ev.target.checked ? [...new Set([...e.sites, c])] : e.sites.filter(x => x !== c); } }), h('span', {}, label)));
+  }
+  out.push(cats);
+  const listCard = (title, key, hint) => {
+    const input = h('input', { type: 'text', class: 'site-input', placeholder: 'esempio.it', autocapitalize: 'off', autocomplete: 'off', 'aria-label': title });
+    const add = () => {
+      const d = L.siteHost(input.value);
+      if (!d) { toast('Scrivi solo il nome del sito, per esempio esempio.it'); return; }
+      e.allow = e.allow.filter(x => x !== d); e.deny = e.deny.filter(x => x !== d);
+      e[key].push(d); render();
+    };
+    input.addEventListener('keydown', ev => { if (ev.key === 'Enter') add(); });
+    return h('div', { class: 'card' }, h('p', { class: 'card-head' }, title), h('p', { class: 'caption' }, hint),
+      e[key].map(d => h('div', { class: 'site-row' }, h('span', {}, d),
+        h('button', { class: 'link', 'aria-label': 'Togli ' + d, onclick: () => { e[key] = e[key].filter(x => x !== d); render(); } }, 'Togli'))),
+      h('div', { class: 'site-add' }, input, h('button', { class: 'btn ghost', onclick: add }, 'Aggiungi')));
+  };
+  out.push(h('div', { class: 'section' }, 'I tuoi elenchi'));
+  out.push(listCard('Sempre bloccati', 'deny', 'Per esempio un sito di giochi che non volete.'));
+  out.push(listCard('Sempre consentiti', 'allow', 'Se un sito utile viene bloccato per errore.'));
+  out.push(h('button', { class: 'btn primary', onclick: async ev => {
+    ev.target.disabled = true;
+    e.sitesChosen = true;
+    if (await sendRules(e)) { S.editRules = null; toast('Filtro inviato: vale entro circa 30 secondi', 4000); go('child'); }
+    else { ev.target.disabled = false; toast('Prima collega il telefono di tuo figlio'); }
+  } }, 'Salva e manda al telefono di tuo figlio'));
+  out.push(h('p', { class: 'caption' }, 'Gli elenchi sono scritti da noi e restano sul telefono di tuo figlio: nessun sito visitato viene mandato, solo quelli bloccati.'));
+  return out;
+}
+async function sendRules(edit) {
+  const r = { version: Math.max(S.rules.version + 1, Math.floor(Date.now() / 1000) - 1700000000), night: edit.night, limits: edit.limits,
+    sites: edit.sites || [], allow: edit.allow || [], deny: edit.deny || [], sitesChosen: !!edit.sitesChosen };
+  if (!await sendToChild(L.rulesMessage(Date.now(), r))) return false;
+  S.rules = r; saveSoon();
+  return true;
+}
+async function answerExtra(r, yes) {
+  if (!await sendToChild(L.extraMessage(Date.now(), r.pkg, r.label, r.minutes, yes ? L.EXTRA_YES : L.EXTRA_NO))) return;
+  S.requests = S.requests.filter(x => x.pkg !== r.pkg); saveSoon();
+  toast(yes ? r.minutes + ' minuti in più per ' + r.label : 'Risposta inviata'); render();
 }
 
 function settingsPage() {

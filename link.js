@@ -8,7 +8,9 @@ const subtle = globalThis.crypto.subtle;
 
 export const CODE_PREFIX = 'TG1.', WIRE_PREFIX = 'T1.';
 export const C2P = 1, P2C = 2, WIRE_VERSION = 1, TOPIC_LENGTH = 32;
-export const TYPES = ['ALERT', 'CASE_OPEN', 'CASE_FRAGMENTS', 'STATUS', 'CLOSE_CASE', 'PUSH'];
+// 0.22: USAGE (child: minutes per app), RULES (parent: screen-time rules), EXTRA (more time: asked / granted / refused).
+export const TYPES = ['ALERT', 'CASE_OPEN', 'CASE_FRAGMENTS', 'STATUS', 'CLOSE_CASE', 'PUSH', 'USAGE', 'RULES', 'EXTRA'];
+export const EXTRA_ASK = 0, EXTRA_YES = 1, EXTRA_NO = 2;
 export const PUSH_ACTIVE = 1, PUSH_EXPIRED = 2;
 export const STATES = ['ACTIVE', 'INTERRUPTED', 'RESUMED', 'STOPPED', 'PAIRED'];
 export const LEVEL_HIGH = 1, LEVEL_DOUBT = 2, OUTCOME_OK = 1, OUTCOME_INTERVENE = 2;
@@ -174,6 +176,59 @@ export function encodeMessage(m) {
   return out;
 }
 export function closeMessage(time, caseId, outcome) { return encodeMessage({ type: 'CLOSE_CASE', time, caseId, outcome }); }
+
+// ---- 0.22: screen time (same text lines as ScreenRules.java) ----
+/** rules = { version, night: [start, end] | null (minutes of the day), limits: [{ pkg, label, minutes }] (0 = blocked),
+ *  0.23: sites: ['ADULT', 'GAMBLING', 'VIOLENCE'], allow: [domain], deny: [domain] } */
+export const SITE_CATEGORIES = [['ADULT', 'Siti per adulti'], ['GAMBLING', 'Scommesse e casinò'], ['VIOLENCE', 'Violenza estrema']];
+export function rulesLines(r) {
+  const out = [];
+  if (r.night && r.night[0] !== r.night[1]) out.push('night|' + r.night[0] + '|' + r.night[1]);
+  for (const l of r.limits || []) out.push('limit|' + l.pkg + '|' + l.minutes + '|' + String(l.label || l.pkg).replace(/\|/g, ' ').slice(0, 40));
+  for (const [c] of SITE_CATEGORIES) if ((r.sites || []).includes(c)) out.push('site|' + c);
+  for (const d of r.allow || []) out.push('allow|' + d);
+  for (const d of r.deny || []) out.push('deny|' + d);
+  return out;
+}
+export function parseRules(version, lines) {
+  const r = { version, night: null, limits: [], sites: [], allow: [], deny: [] };
+  for (const line of lines || []) {
+    const f = line.split('|');
+    if (f[0] === 'night' && f.length >= 3) {
+      const a = parseInt(f[1], 10), b = parseInt(f[2], 10);
+      if (a >= 0 && a < 1440 && b >= 0 && b < 1440) r.night = [a, b];
+    } else if (f[0] === 'limit' && f.length >= 3 && f[1] && r.limits.length < 60) {
+      const m = parseInt(f[2], 10);
+      if (m >= 0) r.limits.push({ pkg: f[1], label: f.slice(3).join('|') || f[1], minutes: Math.min(m, 1440) });
+    } else if (f[0] === 'site' && SITE_CATEGORIES.some(([c]) => c === f[1]) && !r.sites.includes(f[1])) r.sites.push(f[1]);
+    else if ((f[0] === 'allow' || f[0] === 'deny') && siteHost(f[1])) {
+      const d = siteHost(f[1]);
+      r.allow = r.allow.filter(x => x !== d); r.deny = r.deny.filter(x => x !== d);
+      const list = f[0] === 'allow' ? r.allow : r.deny;
+      if (list.length < 100) list.push(d);
+    }
+  }
+  return r;
+}
+/** Same as SiteFilter.host: «https://www.Example.com/x» → «example.com», or null. */
+export function siteHost(typed) {
+  let v = String(typed || '').trim().toLowerCase();
+  if (!v || v.includes(' ')) return null;
+  const i = v.indexOf('://'); if (i >= 0) v = v.slice(i + 3);
+  v = v.split(/[/?#:]/)[0];
+  const at = v.lastIndexOf('@'); if (at >= 0) v = v.slice(at + 1);
+  v = v.replace(/\.+$/, '');
+  if (!v.includes('.') || v.startsWith('.') || !/^[a-z0-9.\-]+$/.test(v)) return null;
+  return v.startsWith('www.') ? v.slice(4) : v;
+}
+export function rulesMessage(time, r) { return encodeMessage({ type: 'RULES', time, caseId: r.version, fragments: rulesLines(r) }); }
+export function extraMessage(time, pkg, label, minutes, outcome) {
+  return encodeMessage({ type: 'EXTRA', time, text: pkg, app: label, caseId: minutes, outcome });
+}
+/** USAGE fragments «label|minutes|package» -> [{ label, minutes, pkg }]. */
+export function parseUsage(fragments) {
+  return (fragments || []).map(f => { const p = f.split('|'); return { label: p[0] || p[2], minutes: parseInt(p[1], 10) || 0, pkg: p[2] || p[0] }; });
+}
 
 // ---- 0.16: our mailbox server (worker/, Cloudflare): same sealed texts, kept 7 days. '' = not used. ----
 export const MAILBOX = 'https://phylax-mailbox.phylax-mailbox.workers.dev';
