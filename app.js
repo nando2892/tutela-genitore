@@ -8,7 +8,7 @@ import * as L from './link.js';
 import * as Bio from './bio.js';
 import * as QR from './qr.js';
 
-const VERSION = '0.15';
+const VERSION = '0.16';
 const SILENT_MS = 60 * 60 * 1000;            // like LinkPolicy: warning after 1 hour without messages
 const MAX_AGE_S = 24 * 60 * 60;              // reject messages published > 24 h after they were written (replays)
 const LOCK_AFTER_MS = 5 * 60 * 1000;         // PIN again after 5 minutes in the background
@@ -310,6 +310,29 @@ function announce(what, m) {
   }
 }
 
+// ---------- 0.16: our mailbox (kept 7 days), read next to the ntfy stream ----------
+let mboxBusy = false, mboxLast = 0;
+/** Runs inside enqueue() (never calls it): messages after the saved position, through the same handle(). */
+async function pollMailbox(freshMs = 0) {
+  if (!L.MAILBOX || !S.pair || !S.ready || mboxBusy) return;
+  if (freshMs && Date.now() - mboxLast < freshMs) return;
+  mboxBusy = true; mboxLast = Date.now();
+  const topic = S.pair.topic;
+  try {
+    const box = await L.mailboxName(topic, 'c2p');
+    for (let page = 0; page < 20; page++) {
+      const r = await L.mailboxPoll(box, S.mboxSince || 0);
+      if (!S.pair || S.pair.topic !== topic) return; // new pairing meanwhile
+      for (const m of r.messages) await handle({ id: null, time: Math.floor(m.t / 1000), message: m.msg }, S.loaded);
+      if (r.next !== S.mboxSince) { S.mboxSince = r.next; db.set('mboxSince', S.mboxSince).catch(() => {}); }
+      if (r.messages.length < 100) break;
+    }
+    S.mboxOk = true;
+  } catch { S.mboxOk = false; } finally { mboxBusy = false; }
+  scheduleRender();
+}
+setInterval(() => { if (L.MAILBOX && S.ready && document.visibilityState === 'visible') enqueue(() => pollMailbox()); }, 15000);
+
 // ---------- ntfy connection ----------
 function enqueue(fn) { queue = queue.then(fn, fn); return queue; }
 async function connect() {
@@ -317,6 +340,7 @@ async function connect() {
   clearTimeout(reconnectTimer);
   const ctrl = streamCtrl = new AbortController();
   try {
+    await enqueue(() => pollMailbox()); // 0.16: the mailbox first (it keeps 7 days), then ntfy
     if (!S.loaded) {
       // Backlog first (rebuilds the state), then the live stream from the last id.
       const backlog = await L.poll(S.pair.topic, 'all');
@@ -324,7 +348,10 @@ async function connect() {
       S.loaded = true;
     }
     S.online = true; S.error = ''; scheduleRender();
-    await L.stream(S.pair.topic, S.lastId, ev => enqueue(() => handle(ev, true)), ctrl.signal, () => { lastActivity = Date.now(); });
+    await L.stream(S.pair.topic, S.lastId, ev => enqueue(async () => {
+      await pollMailbox(3000); // older messages that only reached the mailbox come first (counters only go up)
+      await handle(ev, true);
+    }), ctrl.signal, () => { lastActivity = Date.now(); });
   } catch (e) {
     if (!ctrl.signal.aborted) S.error = 'Connessione a ntfy non riuscita: nuovo tentativo tra poco.';
   }
@@ -359,7 +386,15 @@ async function drain() {
   if (draining || !S.pair) return;
   draining = true;
   while (S.outbox.length) {
-    try { await L.publish(S.pair.topic, S.outbox[0]); S.outbox.shift(); S.outboxWait = 5000; await db.set('outbox', S.outbox); }
+    try {
+      // 0.16: to the mailbox and to ntfy; sent if one took it (the child drops a duplicate by its counter).
+      let ok = false;
+      if (L.MAILBOX && await ensureKeys()) {
+        try { await L.mailboxPost(await L.mailboxName(S.pair.topic, 'p2c'), S.keys.mailboxAuth, S.outbox[0]); ok = true; } catch { /* ntfy below */ }
+      }
+      try { await L.publish(S.pair.topic, S.outbox[0]); ok = true; } catch (e) { if (!ok) throw e; }
+      S.outbox.shift(); S.outboxWait = 5000; await db.set('outbox', S.outbox);
+    }
     catch {
       S.error = 'Chiusura non ancora inviata (rete): nuovo tentativo tra ' + Math.round(S.outboxWait / 1000) + ' s.';
       setTimeout(drain, S.outboxWait); S.outboxWait = Math.min(S.outboxWait * 2, 300000);
@@ -447,7 +482,8 @@ async function newPairing() {
   resetData();
   await db.set('pair', S.pair);
   S.archived = new Map();
-  for (const k of ['child', 'sent', 'seenMax', 'lastSeen', 'outbox', 'archived', 'pushSent', 'pushState', 'vault']) await db.del(k);
+  S.mboxSince = 0;
+  for (const k of ['child', 'sent', 'seenMax', 'lastSeen', 'outbox', 'archived', 'pushSent', 'pushState', 'vault', 'mboxSince']) await db.del(k);
   clearTimeout(saveTimer);
   disconnect(true);
 }
@@ -626,7 +662,7 @@ function homePage() {
   const out = [header('Phylax Genitore'), h('p', { class: 'sub' }, 'Avvisi cifrati dal telefono di tuo figlio.'), statusCard()];
   if (S.pair) {
     out.push(h('p', { class: 'caption' }, h('span', { class: 'dot' + (S.online ? ' on' : '') }),
-      S.online ? 'In ascolto (ntfy.sh, solo testo cifrato)' : 'Non collegato: riconnessione…', S.error ? ' · ' + S.error : ''));
+      S.online ? (L.MAILBOX ? (S.mboxOk === false ? 'In ascolto (ntfy.sh; casella non raggiungibile)' : 'In ascolto (casella cifrata + ntfy.sh)') : 'In ascolto (ntfy.sh, solo testo cifrato)') : 'Non collegato: riconnessione…', S.error ? ' · ' + S.error : ''));
   }
   out.push(h('div', { class: 'section' }, 'Segnalazioni aperte'));
   const reports = [...S.reports.values()];
@@ -656,8 +692,9 @@ function homePage() {
       : 'Disattivo · tocca per attivarlo · il PIN resta sempre valido', toggleBio));
   }
   out.push(navRow('🔒', 'Blocca ora', S.bio ? 'Chiede Face ID o il PIN' : 'Chiede di nuovo il PIN', () => { S.unlocked = false; render(); }));
-  out.push(h('p', { class: 'caption center' }, 'Versione web ' + VERSION + ' · consegna tramite ntfy.sh (gratuito, solo testo cifrato) · '
-    + 'sul server restano cifrati per circa 12 ore; qui restano salvati cifrati (chiave protetta dal PIN o da Face ID) · solo prove con messaggi inventati [TUTELA-TEST]'));
+  out.push(h('p', { class: 'caption center' }, 'Versione web ' + VERSION + ' · consegna tramite '
+    + (L.MAILBOX ? 'la nostra casella cifrata (Cloudflare, tiene i messaggi 7 giorni) e ntfy.sh (12 ore)' : 'ntfy.sh (gratuito; sul server restano cifrati per circa 12 ore)')
+    + ', solo testo cifrato · qui restano salvati cifrati (chiave protetta dal PIN o da Face ID) · solo prove con messaggi inventati [TUTELA-TEST]'));
   return out;
 }
 function alertCard(a, archived) {
@@ -798,6 +835,7 @@ window.addEventListener('online', () => { drain(); if (!streamCtrl) connect(); }
     S.showCode = !S.child;
     S.sent = await db.get('sent') || 0;
     S.seenMax = await db.get('seenMax') || 0;
+    S.mboxSince = await db.get('mboxSince') || 0;
     S.lastSeen = S.lastSeenSaved = await db.get('lastSeen') || 0;
     S.outbox = await db.get('outbox') || [];
     S.archived = new Map(await db.get('archived') || []);

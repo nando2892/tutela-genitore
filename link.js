@@ -93,9 +93,10 @@ export async function derive(myPrivate, theirPublic, topic) {
   const prk = await hmac(salt, secret);
   secret.fill(0);
   const c2pRaw = await expand(prk, 'c2p', 32), p2cRaw = await expand(prk, 'p2c', 32), v = await expand(prk, 'verify', 4);
+  const mailboxAuth = b64(await expand(prk, 'mbox-auth', 32)); // 0.16: pair secret for writing to the mailbox server
   const n = ((v[0] << 24) >>> 0) + (v[1] << 16) + (v[2] << 8) + v[3];
   const aes = raw => subtle.importKey('raw', raw, { name: 'AES-GCM' }, false, ['encrypt', 'decrypt']);
-  return { c2p: await aes(c2pRaw), p2c: await aes(p2cRaw), verification: String(n % 1000000).padStart(6, '0'), c2pRaw, p2cRaw };
+  return { c2p: await aes(c2pRaw), p2c: await aes(p2cRaw), verification: String(n % 1000000).padStart(6, '0'), c2pRaw, p2cRaw, mailboxAuth };
 }
 
 export function peek(wire) {
@@ -173,6 +174,25 @@ export function encodeMessage(m) {
   return out;
 }
 export function closeMessage(time, caseId, outcome) { return encodeMessage({ type: 'CLOSE_CASE', time, caseId, outcome }); }
+
+// ---- 0.16: our mailbox server (worker/, Cloudflare): same sealed texts, kept 7 days. '' = not used. ----
+export const MAILBOX = 'https://phylax-mailbox.phylax-mailbox.workers.dev';
+/** SHA-256("phylax-mbox-v1:" + topic + ":c2p"|":p2c") in hex, as SecureLink.mailbox: the server never sees the topic. */
+export async function mailboxName(topic, dir) {
+  const d = new Uint8Array(await subtle.digest('SHA-256', enc.encode('phylax-mbox-v1:' + topic + ':' + dir)));
+  return [...d].map(b => b.toString(16).padStart(2, '0')).join('');
+}
+export async function mailboxPost(box, auth, body) {
+  const r = await fetch(MAILBOX + '/v1/m/' + box, { method: 'POST', body, headers: { 'Content-Type': 'text/plain', Authorization: 'Bearer ' + auth } });
+  if (!r.ok) throw new Error('casella ' + r.status);
+}
+/** { messages: [{id, t, msg}], next } — oldest first, at most 100 after `since`. */
+export async function mailboxPoll(box, since) {
+  const r = await fetch(MAILBOX + '/v1/m/' + box + '?since=' + (Number(since) || 0), { cache: 'no-store' });
+  if (!r.ok) throw new Error('casella ' + r.status);
+  const j = await r.json();
+  return { messages: Array.isArray(j.messages) ? j.messages.filter(m => typeof m.msg === 'string' && Number.isSafeInteger(m.id)) : [], next: Number(j.next) || Number(since) || 0 };
+}
 
 // ---- ntfy.sh transport (prototype): only ciphertext travels on the main topic ----
 export const NTFY = 'https://ntfy.sh/';
