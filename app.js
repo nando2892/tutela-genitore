@@ -5,7 +5,7 @@
 import * as L from './link.js';
 import * as Bio from './bio.js';
 
-const VERSION = '0.13';
+const VERSION = '0.14';
 const SILENT_MS = 60 * 60 * 1000;            // like LinkPolicy: warning after 1 hour without messages
 const MAX_AGE_S = 24 * 60 * 60;              // reject messages published > 24 h after they were written (replays)
 const LOCK_AFTER_MS = 5 * 60 * 1000;         // PIN again after 5 minutes in the background
@@ -554,6 +554,7 @@ function alertCard(a, archived) {
     h('div', { class: 'alert-top' }, h('span', { class: 'chip ' + (a.high ? 'danger' : a.doubt ? 'doubt' : 'warning') }, a.high ? 'Rischio alto' : a.doubt ? 'Dubbio · da guardare' : 'Da verificare'),
       h('span', { class: 'time' }, hm(a.time))),
     h('h3', {}, a.category), h('p', { class: 'meta' }, a.app), h('div', { class: 'quote' }, a.text),
+    a.category === 'Possibile foto intima' ? h('p', { class: 'caption' }, '📷 Solo testo: l\'immagine resta sul telefono di tuo figlio e non viene mai inviata. Non chiedere di vederla o di inoltrartela.') : null,
     h('button', { class: 'link', onclick: () => { setArchived(a, !archived); toast(archived ? 'Rimesso tra gli avvisi' : 'Avviso archiviato'); render(); } },
       archived ? 'Rimetti tra gli avvisi' : 'Archivia'));
 }
