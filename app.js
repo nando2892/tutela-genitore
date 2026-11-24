@@ -5,7 +5,7 @@
 import * as L from './link.js';
 import * as Bio from './bio.js';
 
-const VERSION = '0.12';
+const VERSION = '0.13';
 const SILENT_MS = 60 * 60 * 1000;            // like LinkPolicy: warning after 1 hour without messages
 const MAX_AGE_S = 24 * 60 * 60;              // reject messages published > 24 h after they were written (replays)
 const LOCK_AFTER_MS = 5 * 60 * 1000;         // PIN again after 5 minutes in the background
@@ -572,7 +572,9 @@ function reportPage(id) {
     h('h3', { class: 'card-title' }, r.reason),
     h('p', { class: 'meta' }, r.app + ' · aperta alle ' + hm(r.opened)),
     r.fragments.map(f => h('div', { class: 'bubble' }, f.text, h('span', { class: 'bt' }, hm(f.time))))));
-  out.push(h('button', { class: 'btn outline', onclick: e => { e.target.disabled = true; closeReport(id, L.OUTCOME_OK); } }, 'Tutto ok · chiudi e cancella'));
+  const language = r.reason === 'Lingua o codice non riconosciuto'; // 0.13: same command as "Tutto ok"
+  out.push(h('button', { class: 'btn outline', onclick: e => { e.target.disabled = true; closeReport(id, L.OUTCOME_OK); } }, language ? 'Questa lingua va bene · chiudi e cancella' : 'Tutto ok · chiudi e cancella'));
+  if (language) out.push(h('p', { class: 'caption' }, 'Per questa chat Phylax non avviserà più solo per la lingua; le parole a rischio continuano a far partire gli avvisi.'));
   out.push(h('button', { class: 'btn primary', onclick: e => { e.target.disabled = true; closeReport(id, L.OUTCOME_INTERVENE); } }, 'Intervengo · chiudi e cancella'));
   out.push(h('p', { class: 'caption' }, 'Chiudere cancella la segnalazione qui e, al prossimo controllo (entro circa 30 secondi), anche sul telefono di tuo figlio.'));
   return out;

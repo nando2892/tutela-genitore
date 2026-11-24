@@ -7,6 +7,7 @@ App web del genitore per ricevere, cifrati, gli avvisi dall'app Android «Phylax
 - Consegna tramite [ntfy.sh](https://ntfy.sh) (gratuito, senza account): il server vede solo testo cifrato.
 - Sul telefono restano solo chiavi, contatori e l'impronta del PIN; gli avvisi non vengono salvati.
 - Tre livelli di avviso (0.12): **Rischio alto** (rosso), **Da verificare** (ambra), **Dubbio · da guardare** (viola: segnale incerto, mandato per sicurezza).
+- «Lingua o codice non riconosciuto» (0.13): se Phylax non capisce una chat (almeno 8 messaggi in 10 minuti, più della metà non riconosciuti) avvisa in viola. Nella segnalazione, «Questa lingua va bene» smette di avvisare per la lingua di quella chat.
 
 ## Su iPhone
 1. Apri il sito in Safari › Condividi › **Aggiungi alla schermata Home**.
