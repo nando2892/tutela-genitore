@@ -8,7 +8,7 @@ import * as L from './link.js';
 import * as Bio from './bio.js';
 import * as QR from './qr.js';
 
-const VERSION = '0.26';
+const VERSION = '0.27';
 const SILENT_MS = 60 * 60 * 1000;            // like LinkPolicy: warning after 1 hour without messages
 const MAX_AGE_S = 24 * 60 * 60;              // reject messages published > 24 h after they were written (replays)
 const LOCK_AFTER_MS = 5 * 60 * 1000;         // PIN again after 5 minutes in the background
@@ -61,7 +61,7 @@ const S = {
   pushState: null, subscribed: false, pushSentEndpoint: null, pushError: '',
   dk: null, dkRaw: null, ready: false, // 0.15: data key once unlocked; ready = saved copy loaded, may connect
   // 0.22: screen time. usage = today's minutes from the child; rules = what we last sent; requests = «15 minuti in più?»
-  usage: { day: '', time: 0, apps: [] }, rules: { version: 0, night: null, limits: [], sites: [], allow: [], deny: [], places: [] }, requests: [], editRules: null,
+  usage: { day: '', time: 0, apps: [] }, rules: { version: 0, night: null, school: null, limits: [], sites: [], allow: [], deny: [], places: [] }, requests: [], editRules: null,
   // 0.24: «Dov'è?»: only the last answer (no history), the last «arrivato»/«uscito» per safe place.
   where: { spot: null, asked: 0, none: '', noneTime: 0, n: 0, places: {} }, placeForm: false,
   battery: { pct: -1, time: 0 }, // 0.25: last battery level from the child's heartbeat
@@ -234,7 +234,7 @@ function closeLocally(id) {
 function resetData() {
   S.alerts = []; S.reports = new Map(); S.state = null; S.detail = ''; S.lastStatus = 0;
   S.lastC2P = 0; S.lastP2C = 0;
-  S.usage = { day: '', time: 0, apps: [] }; S.rules = { version: 0, night: null, limits: [], sites: [], allow: [], deny: [], places: [] }; S.requests = [];
+  S.usage = { day: '', time: 0, apps: [] }; S.rules = { version: 0, night: null, school: null, limits: [], sites: [], allow: [], deny: [], places: [] }; S.requests = [];
   S.where = { spot: null, asked: 0, none: '', noneTime: 0, n: 0, places: {} }; S.battery = { pct: -1, time: 0 };
 }
 function apply(m, receivedAt) {
@@ -954,9 +954,13 @@ const hhmm = m => pad(Math.floor(m / 60)) + ':' + pad(m % 60);
 const dur = m => m < 60 ? m + ' min' : m % 60 === 0 ? (m / 60) + ' h' : Math.floor(m / 60) + ' h ' + (m % 60) + ' min';
 const limitLabel = m => m < 0 ? 'Nessun limite' : m === 0 ? 'In pausa tutto il giorno' : dur(m) + ' al giorno';
 const CHOICES = [-1, 15, 30, 45, 60, 90, 120, 180, 0];
+// 0.27: school mode. Days as bits, Monday = 1 (as on the phone).
+const DAYS = ['lun', 'mar', 'mer', 'gio', 'ven', 'sab', 'dom'];
+const schoolDays = m => m === 31 ? 'lun–ven' : m === 63 ? 'lun–sab' : DAYS.filter((_, i) => m & (1 << i)).join(', ');
 function rulesSummary(r) {
   const parts = [];
   if (r.night) parts.push('Notte ' + hhmm(r.night[0]) + '–' + hhmm(r.night[1]));
+  if (r.school) parts.push('Scuola ' + schoolDays(r.school.days) + ' ' + hhmm(r.school.start) + '–' + hhmm(r.school.end));
   if (r.limits.length) parts.push(r.limits.length + (r.limits.length === 1 ? ' app con limite' : ' app con limite'));
   return parts.length ? parts.join(' · ') : 'Nessuna regola';
 }
@@ -981,13 +985,13 @@ function usageCard() {
     card.append(h('p', { class: 'caption' }, 'Aggiornato alle ' + hm(S.usage.time) + '.'));
   }
   card.append(h('p', { class: 'caption' }, rulesSummary(S.rules)),
-    h('button', { class: 'btn primary', onclick: () => { S.editRules = null; go('time'); } }, 'Limiti e orario notte'));
+    h('button', { class: 'btn primary', onclick: () => { S.editRules = null; go('time'); } }, 'Limiti, notte e scuola'));
   return card;
 }
 function timePage() {
   if (!S.editRules) S.editRules = JSON.parse(JSON.stringify(S.rules));
   const e = S.editRules;
-  const out = [header('Limiti e orario notte', 'child'),
+  const out = [header('Limiti, notte e scuola', 'child'),
     h('p', { class: 'sub' }, 'Decidetelo insieme: a tempo finito tuo figlio può chiederti 15 minuti in più.')];
   out.push(h('div', { class: 'section' }, 'Orario notte'));
   const start = h('input', { type: 'time', class: 'time-input', value: hhmm(e.night ? e.night[0] : 1320), 'aria-label': 'Inizio notte' });
@@ -999,6 +1003,27 @@ function timePage() {
   out.push(h('div', { class: 'card' },
     h('label', { class: 'switch-row' }, toggle, h('span', {}, 'Di notte solo telefono, contatti e sveglia')),
     e.night ? h('div', { class: 'time-row' }, h('span', {}, 'Dalle'), start, h('span', {}, 'alle'), end) : h('p', { class: 'caption' }, 'Spento')));
+  out.push(h('div', { class: 'section' }, 'Modalità scuola'));
+  const sStart = h('input', { type: 'time', class: 'time-input', value: hhmm(e.school ? e.school.start : 480), 'aria-label': 'Inizio scuola' });
+  const sEnd = h('input', { type: 'time', class: 'time-input', value: hhmm(e.school ? e.school.end : 780), 'aria-label': 'Fine scuola' });
+  const sSync = () => {
+    if (!e.school) return;
+    const a = toMin(sStart.value), b = toMin(sEnd.value);
+    if (b > a) { e.school.start = a; e.school.end = b; } else toast('La fine deve venire dopo l\'inizio');
+  };
+  sStart.addEventListener('change', sSync); sEnd.addEventListener('change', sSync);
+  const sToggle = h('input', { type: 'checkbox', checked: !!e.school, onchange: ev => {
+    e.school = ev.target.checked ? { days: 31, start: 480, end: 780 } : null; render(); } });
+  const dayBox = e.school ? h('div', { class: 'days' }, DAYS.map((d, i) => h('label', { class: 'day' },
+    h('input', { type: 'checkbox', checked: !!(e.school.days & (1 << i)), 'aria-label': d, onchange: ev => {
+      const m = ev.target.checked ? e.school.days | (1 << i) : e.school.days & ~(1 << i);
+      if (!m) { ev.target.checked = true; toast('Scegli almeno un giorno'); return; }
+      e.school.days = m; } }), h('span', {}, d)))) : null;
+  out.push(h('div', { class: 'card' },
+    h('label', { class: 'switch-row' }, sToggle, h('span', {}, 'A scuola solo telefono, contatti e sveglia')),
+    e.school ? dayBox : h('p', { class: 'caption' }, 'Spento'),
+    e.school ? h('div', { class: 'time-row' }, h('span', {}, 'Dalle'), sStart, h('span', {}, 'alle'), sEnd) : null,
+    e.school ? h('p', { class: 'caption' }, 'SOS e chiamate funzionano sempre.') : null));
   out.push(h('div', { class: 'section' }, 'Limiti per app'));
   const known = new Map();
   const used = new Map();
@@ -1022,7 +1047,7 @@ function timePage() {
     if (await sendRules(e)) { S.editRules = null; toast('Regole inviate: valgono entro circa 30 secondi', 4000); go('child'); }
     else { ev.target.disabled = false; toast('Prima collega il telefono di tuo figlio'); }
   } }, 'Salva e manda al telefono di tuo figlio'));
-  out.push(h('p', { class: 'caption' }, 'Telefono, contatti, sveglia e Phylax funzionano sempre, anche di notte, così tuo figlio può sempre chiamarti.'));
+  out.push(h('p', { class: 'caption' }, 'Telefono, contatti, sveglia e Phylax funzionano sempre, anche di notte e a scuola, così tuo figlio può sempre chiamarti.'));
   return out;
 }
 // ---------- 0.23: site filter ----------
@@ -1069,11 +1094,13 @@ function sitesPage() {
     if (await sendRules(e)) { S.editRules = null; toast('Filtro inviato: vale entro circa 30 secondi', 4000); go('child'); }
     else { ev.target.disabled = false; toast('Prima collega il telefono di tuo figlio'); }
   } }, 'Salva e manda al telefono di tuo figlio'));
+  out.push(h('p', { class: 'caption' }, 'Se sul telefono di tuo figlio è attivo «Filtro siti in tutte le app», il blocco vale anche dentro le app e i giochi, non solo nel browser. Si attiva dalla configurazione di Phylax sul suo telefono.'));
   out.push(h('p', { class: 'caption' }, 'Gli elenchi sono scritti da noi e restano sul telefono di tuo figlio: nessun sito visitato viene mandato, solo quelli bloccati.'));
   return out;
 }
 async function sendRules(edit) {
   const r = { version: Math.max(S.rules.version + 1, Math.floor(Date.now() / 1000) - 1700000000), night: edit.night, limits: edit.limits,
+    school: edit.school !== undefined ? edit.school : (S.rules.school || null),
     sites: edit.sites || [], allow: edit.allow || [], deny: edit.deny || [], sitesChosen: !!edit.sitesChosen,
     places: edit.places || S.rules.places || [] };
   if (!await sendToChild(L.rulesMessage(Date.now(), r))) return false;

@@ -195,6 +195,7 @@ export const SITE_CATEGORIES = [['ADULT', 'Siti per adulti'], ['GAMBLING', 'Scom
 export function rulesLines(r) {
   const out = [];
   if (r.night && r.night[0] !== r.night[1]) out.push('night|' + r.night[0] + '|' + r.night[1]);
+  if (r.school && r.school.days && r.school.end > r.school.start) out.push('school|' + r.school.days + '|' + r.school.start + '|' + r.school.end);
   for (const l of r.limits || []) out.push('limit|' + l.pkg + '|' + l.minutes + '|' + String(l.label || l.pkg).replace(/\|/g, ' ').slice(0, 40));
   for (const [c] of SITE_CATEGORIES) if ((r.sites || []).includes(c)) out.push('site|' + c);
   for (const d of r.allow || []) out.push('allow|' + d);
@@ -217,12 +218,15 @@ export function setPlace(list, p) {
   return has ? list.map(x => x.name === p.name ? p : x) : [...list, p];
 }
 export function parseRules(version, lines) {
-  const r = { version, night: null, limits: [], sites: [], allow: [], deny: [], places: [] };
+  const r = { version, night: null, school: null, limits: [], sites: [], allow: [], deny: [], places: [] };
   for (const line of lines || []) {
     const f = line.split('|');
     if (f[0] === 'night' && f.length >= 3) {
       const a = parseInt(f[1], 10), b = parseInt(f[2], 10);
       if (a >= 0 && a < 1440 && b >= 0 && b < 1440) r.night = [a, b];
+    } else if (f[0] === 'school' && f.length >= 4) { // 0.27: days as bits (Monday = 1), minutes of the day
+      const d = parseInt(f[1], 10) & 127, a = parseInt(f[2], 10), b = parseInt(f[3], 10);
+      if (d > 0 && a >= 0 && b <= 1440 && b > a) r.school = { days: d, start: a, end: b };
     } else if (f[0] === 'limit' && f.length >= 3 && f[1] && r.limits.length < 60) {
       const m = parseInt(f[2], 10);
       if (m >= 0) r.limits.push({ pkg: f[1], label: f.slice(3).join('|') || f[1], minutes: Math.min(m, 1440) });

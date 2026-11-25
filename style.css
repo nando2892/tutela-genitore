@@ -166,6 +166,8 @@ ul.plain li { margin: 6px 0; }
 .switch-row { display: flex; align-items: center; gap: 12px; font-size: 16px; }
 .switch-row input { width: 22px; height: 22px; accent-color: var(--brand); }
 .time-row { display: flex; align-items: center; gap: 10px; margin-top: 14px; flex-wrap: wrap; }
+.days { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; }
+.day { display: inline-flex; align-items: center; gap: 4px; padding: 6px 10px; border: 1px solid var(--border); border-radius: 999px; font-size: 14px; }
 .time-input, .limit-select { font: inherit; padding: 8px 10px; border-radius: 10px; border: 1.5px solid var(--border); background: var(--surface); color: var(--text); }
 .app-limit { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .app-limit .t { font-size: 17px; }
