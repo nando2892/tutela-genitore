@@ -8,7 +8,7 @@ import * as L from './link.js';
 import * as Bio from './bio.js';
 import * as QR from './qr.js';
 
-const VERSION = '0.24';
+const VERSION = '0.25';
 const SILENT_MS = 60 * 60 * 1000;            // like LinkPolicy: warning after 1 hour without messages
 const MAX_AGE_S = 24 * 60 * 60;              // reject messages published > 24 h after they were written (replays)
 const LOCK_AFTER_MS = 5 * 60 * 1000;         // PIN again after 5 minutes in the background
@@ -58,6 +58,7 @@ const S = {
   usage: { day: '', time: 0, apps: [] }, rules: { version: 0, night: null, limits: [], sites: [], allow: [], deny: [], places: [] }, requests: [], editRules: null,
   // 0.24: «Dov'è?»: only the last answer (no history), the last «arrivato»/«uscito» per safe place.
   where: { spot: null, asked: 0, none: '', noneTime: 0, n: 0, places: {} }, placeForm: false,
+  battery: { pct: -1, time: 0 }, // 0.25: last battery level from the child's heartbeat
 };
 
 // ---------- Small helpers ----------
@@ -167,7 +168,7 @@ const Vault = (() => {
       if (!S.dk) return;
       const snap = { v: 1, alerts: S.alerts, reports: [...S.reports.values()], state: S.state, detail: S.detail,
         lastStatus: S.lastStatus, lastSeen: S.lastSeen, lastC2P: S.lastC2P, lastP2C: S.lastP2C,
-        usage: S.usage, rules: S.rules, requests: S.requests, where: S.where };
+        usage: S.usage, rules: S.rules, requests: S.requests, where: S.where, battery: S.battery };
       await db.set('vault', await seal(S.dk, enc.encode(JSON.stringify(snap)), AAD));
     },
     /** Puts the saved copy into S. Counters come with it, so re-reading the mailbox does not add the same messages twice. */
@@ -186,6 +187,7 @@ const Vault = (() => {
       if (snap.rules) S.rules = snap.rules;
       S.requests = snap.requests || [];
       if (snap.where) S.where = snap.where;
+      if (snap.battery) S.battery = snap.battery;
       if (!S.rules.places) S.rules.places = [];
       return true;
     },
@@ -227,7 +229,7 @@ function resetData() {
   S.alerts = []; S.reports = new Map(); S.state = null; S.detail = ''; S.lastStatus = 0;
   S.lastC2P = 0; S.lastP2C = 0;
   S.usage = { day: '', time: 0, apps: [] }; S.rules = { version: 0, night: null, limits: [], sites: [], allow: [], deny: [], places: [] }; S.requests = [];
-  S.where = { spot: null, asked: 0, none: '', noneTime: 0, n: 0, places: {} };
+  S.where = { spot: null, asked: 0, none: '', noneTime: 0, n: 0, places: {} }; S.battery = { pct: -1, time: 0 };
 }
 function apply(m, receivedAt) {
   S.lastSeen = Math.max(S.lastSeen, receivedAt);
@@ -250,9 +252,11 @@ function apply(m, receivedAt) {
     case 'STATUS': {
       if (m.time < S.lastStatus) return 'NONE';
       S.lastStatus = m.time;
+      if ((m.outcome === L.BATTERY_INFO || m.outcome === L.BATTERY_LOW) && m.level >= 0 && m.level <= 100) S.battery = { pct: m.level, time: m.time };
       const changed = S.state !== m.state;
       S.state = m.state;
       if (!m.heartbeat || m.text) S.detail = m.text;
+      if (m.outcome === L.BATTERY_LOW) return 'BATTERY_LOW';
       return changed || !m.heartbeat ? 'STATUS' : 'NONE';
     }
     case 'USAGE':
@@ -345,6 +349,8 @@ async function handle(ev, live) {
 function announce(what, m) {
   if (what === 'NONE' || what === 'REPORT_UPDATED' && !m.fragments.length) return;
   const text = what === 'EXTRA' ? 'Tuo figlio chiede ' + m.caseId + ' minuti in più' :
+    what === 'ALERT' && m.category === L.CAT_SOS ? 'SOS da tuo figlio' :
+    what === 'BATTERY_LOW' ? 'Batteria quasi scarica sul telefono di tuo figlio (' + m.level + '%)' :
     what === 'LOCATION' ? 'Posizione di tuo figlio arrivata' : what === 'LOCATION_NONE' ? 'Posizione non disponibile' :
     what === 'PLACE' ? (m.level === 1 ? 'Arrivato: ' : 'Uscito: ') + m.app : what === 'ALERT' ? 'Nuovo avviso' : what === 'REPORT_OPENED' ? 'Segnalazione aperta' :
     what === 'REPORT_UPDATED' ? 'Nuovo messaggio nella segnalazione' : m.state === 'INTERRUPTED' ? 'Protezione interrotta' : 'Stato aggiornato';
@@ -698,12 +704,15 @@ function childState() {
   const now = Date.now();
   if (!S.pair) return { cls: 'idle', title: 'Telefono non collegato', line: 'Collega il telefono di tuo figlio per ricevere gli avvisi.' };
   if (!S.child) return { cls: 'idle', title: 'In attesa del telefono di tuo figlio', line: 'Fai inquadrare il QR dal suo telefono per finire il collegamento.' };
+  if (S.loaded && now - S.lastSeen > SILENT_MS && S.battery.pct >= 0 && S.battery.pct <= 10)
+    return { cls: 'idle', title: 'Probabilmente spento: batteria scarica', line: 'L\'ultima volta la batteria era al ' + S.battery.pct + '% (' + ago(now - S.battery.time) + ').' };
   if (S.loaded && now - S.lastSeen > SILENT_MS) return { cls: 'broken', title: 'Non risponde da più di 1 ora', line: 'Può essere spento o senza rete, oppure l\'app è stata fermata o tolta.' };
   if (!S.state) return { cls: '', title: 'Collegato', line: S.loaded ? 'Nessuna notizia nelle ultime ore.' : 'Sto leggendo gli avvisi…' };
-  const last = 'ultimo contatto ' + ago(now - S.lastSeen);
-  if (S.state === 'INTERRUPTED') return { cls: 'broken', title: 'Protezione interrotta', line: (S.detail ? S.detail + ' · ' : '') + last };
-  if (S.state === 'STOPPED') return { cls: 'idle', title: 'Protezione in pausa', line: (S.detail ? S.detail + ' · ' : '') + last };
-  return { cls: '', title: 'Protezione attiva', line: (S.detail ? S.detail + ' · ' : '') + last };
+  const last = 'ultimo contatto ' + ago(now - S.lastSeen) + (S.battery.pct >= 0 ? ' · batteria ' + S.battery.pct + '%' : '');
+  const detail = S.detail && !S.detail.startsWith("Batteria") ? S.detail : ""; // the battery is shown once
+  if (S.state === 'INTERRUPTED') return { cls: 'broken', title: 'Protezione interrotta', line: (detail ? detail + " · " : "") + last };
+  if (S.state === 'STOPPED') return { cls: 'idle', title: 'Protezione in pausa', line: (detail ? detail + " · " : "") + last };
+  return { cls: '', title: 'Protezione attiva', line: (detail ? detail + " · " : "") + last };
 }
 
 /** Home summary: "Tutto ok" or "N avvisi da guardare", with the owl. */
@@ -846,6 +855,8 @@ function timePage() {
   const known = new Map();
   const used = new Map();
   for (const a of S.usage.apps) { known.set(a.pkg, a.label); if (S.usage.day === today()) used.set(a.pkg, a.minutes); }
+  // 0.25: apps the child just installed, even before they have minutes.
+  for (const a of S.alerts) { const pkg = a.category === L.CAT_NEW_APP && L.newAppPackage(a.text); if (pkg && !known.has(pkg)) known.set(pkg, a.app); }
   for (const l of e.limits) if (!known.has(l.pkg)) known.set(l.pkg, l.label);
   if (!known.size) out.push(h('div', { class: 'card empty' }, h('b', {}, 'Ancora nessuna app'), 'Le app compaiono qui quando arrivano i primi minuti di utilizzo dal telefono di tuo figlio.'));
   for (const [pkg, label] of known) {
@@ -1024,11 +1035,14 @@ function alertCard(a, archived) {
     ? '📷 L\'immagine resta sul telefono di tuo figlio e non viene mai inviata. Non chiedere di vederla o di inoltrartela.'
     : /visualizzazione singola/i.test(a.category)
       ? '👁 Phylax vede solo che c\'è stato un contenuto che si apre una volta, non cosa contiene. Parlane con calma: a volte è uno scherzo, a volte una pressione.'
-      : /vocali/i.test(a.category) ? '🎙 Phylax non ascolta i vocali: conta solo quanti ne arrivano di notte.' : null;
+      : /vocali/i.test(a.category) ? '🎙 Phylax non ascolta i vocali: conta solo quanti ne arrivano di notte.'
+      : a.category === L.CAT_SOS ? '🆘 Se ha la posizione attiva, la trovi in Figlio › Dov\'è?. Chiamalo.' : null;
+  const limit = a.category === L.CAT_NEW_APP && L.newAppPackage(a.text)
+    ? h('button', { class: 'link', onclick: () => { S.editRules = null; go('time'); } }, 'Dai un limite o mettila in pausa ›') : null;
   return h('div', { class: 'card alert ' + level[0] + (archived ? ' archived' : '') },
     h('div', { class: 'alert-top' }, h('span', { class: 'chip ' + level[0] }, level[1]), h('span', { class: 'time' }, hm(a.time))),
     h('h3', {}, a.category), h('p', { class: 'meta' }, a.app), h('div', { class: 'quote' }, a.text),
-    note ? h('p', { class: 'caption' }, note) : null,
+    note ? h('p', { class: 'caption' }, note) : null, limit,
     h('button', { class: 'link', onclick: () => { setArchived(a, !archived); toast(archived ? 'Rimesso tra gli avvisi' : 'Avviso archiviato'); render(); } },
       archived ? 'Rimetti tra gli avvisi' : 'Archivia'));
 }

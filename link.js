@@ -13,6 +13,15 @@ export const TYPES = ['ALERT', 'CASE_OPEN', 'CASE_FRAGMENTS', 'STATUS', 'CLOSE_C
 export const EXTRA_ASK = 0, EXTRA_YES = 1, EXTRA_NO = 2;
 /** 0.24 LOCATION: parent asks (LOC_ASK), child answers once (LOC_HERE «lat,lon,metri,ora» / LOC_NONE why) or a safe place event. */
 export const LOC_ASK = 0, LOC_HERE = 1, LOC_NONE = 2, LOC_PLACE = 3;
+/** 0.25: STATUS outcome = battery info (level = %), BATTERY_LOW = «quasi scarica»; alert categories that are information. */
+export const BATTERY_INFO = 1, BATTERY_LOW = 2, CAT_SOS = 'SOS', CAT_NEW_APP = 'Nuova app installata', CAT_ACCESS = 'Accesso tolto';
+/** Package in brackets at the end of a «Nuova app installata» text, or null (same as LinkMessage.newAppPackage). */
+export function newAppPackage(text) {
+  const t = String(text || ''), a = t.lastIndexOf('('), b = t.lastIndexOf(')');
+  if (a < 0 || b <= a + 1) return null;
+  const p = t.slice(a + 1, b);
+  return /^[A-Za-z0-9_]+(\.[A-Za-z0-9_]+)+$/.test(p) ? p : null;
+}
 export const PUSH_ACTIVE = 1, PUSH_EXPIRED = 2;
 export const STATES = ['ACTIVE', 'INTERRUPTED', 'RESUMED', 'STOPPED', 'PAIRED'];
 export const LEVEL_HIGH = 1, LEVEL_DOUBT = 2, OUTCOME_OK = 1, OUTCOME_INTERVENE = 2;
