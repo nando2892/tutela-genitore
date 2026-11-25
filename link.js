@@ -9,7 +9,7 @@ const subtle = globalThis.crypto.subtle;
 export const CODE_PREFIX = 'TG1.', WIRE_PREFIX = 'T1.';
 export const C2P = 1, P2C = 2, WIRE_VERSION = 1, TOPIC_LENGTH = 32;
 // 0.22: USAGE (child: minutes per app), RULES (parent: screen-time rules), EXTRA (more time: asked / granted / refused).
-export const TYPES = ['ALERT', 'CASE_OPEN', 'CASE_FRAGMENTS', 'STATUS', 'CLOSE_CASE', 'PUSH', 'USAGE', 'RULES', 'EXTRA', 'LOCATION', 'WEEK', 'APPS']; // 0.28: WEEK = weekly summary; 0.29: APPS = installed apps
+export const TYPES = ['ALERT', 'CASE_OPEN', 'CASE_FRAGMENTS', 'STATUS', 'CLOSE_CASE', 'PUSH', 'USAGE', 'RULES', 'EXTRA', 'LOCATION', 'WEEK', 'APPS', 'ICONS']; // 0.28: WEEK = weekly summary; 0.29: APPS = installed apps; 0.32: ICONS = their icons
 export const EXTRA_ASK = 0, EXTRA_YES = 1, EXTRA_NO = 2;
 /** 0.24 LOCATION: parent asks (LOC_ASK), child answers once (LOC_HERE «lat,lon,metri,ora» / LOC_NONE why) or a safe place event. */
 export const LOC_ASK = 0, LOC_HERE = 1, LOC_NONE = 2, LOC_PLACE = 3;
@@ -245,7 +245,21 @@ export function parseApps(fragments) {
   }
   return out;
 }
-export function askAppsMessage(time) { return encodeMessage({ type: 'APPS', time }); }
+/** 0.32: icons = this parent is missing some icons, the child sends them all again. */
+export function askAppsMessage(time, icons = false) { return encodeMessage({ type: 'APPS', time, level: icons ? ASK_ICONS : 0 }); }
+export const ASK_ICONS = 1, MAX_ICON_CHARS = 2000, MAX_ICONS = 250;
+/** 0.32: ICONS fragments «package|base64 WEBP» ("" = no icon) -> [{ pkg, data }], only plain base64. */
+export function parseIcons(fragments) {
+  const out = [];
+  for (const f of fragments || []) {
+    const cut = f.indexOf('|');
+    if (cut <= 0) continue;
+    const data = f.slice(cut + 1);
+    if (data.length > MAX_ICON_CHARS || !/^[A-Za-z0-9+/=]*$/.test(data)) continue;
+    out.push({ pkg: f.slice(0, cut), data });
+  }
+  return out;
+}
 export function parseRules(version, lines) {
   const r = { version, night: null, school: null, limits: [], sites: [], allow: [], deny: [], places: [] };
   for (const line of lines || []) {

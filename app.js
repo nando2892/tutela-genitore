@@ -8,7 +8,7 @@ import * as L from './link.js';
 import * as Bio from './bio.js';
 import * as QR from './qr.js';
 
-const VERSION = '0.29';
+const VERSION = '0.32';
 const SILENT_MS = 60 * 60 * 1000;            // like LinkPolicy: warning after 1 hour without messages
 const MAX_AGE_S = 24 * 60 * 60;              // reject messages published > 24 h after they were written (replays)
 const LOCK_AFTER_MS = 5 * 60 * 1000;         // PIN again after 5 minutes in the background
@@ -174,7 +174,7 @@ const Vault = (() => {
       if (!S.dk) return;
       const snap = { v: 1, alerts: S.alerts, reports: [...S.reports.values()], state: S.state, detail: S.detail,
         lastStatus: S.lastStatus, lastSeen: S.lastSeen, lastC2P: S.lastC2P, lastP2C: S.lastP2C,
-        usage: S.usage, week: S.week, apps: S.apps, rules: S.rules, requests: S.requests, where: S.where, battery: S.battery };
+        usage: S.usage, week: S.week, apps: S.apps, icons: S.icons, rules: S.rules, requests: S.requests, where: S.where, battery: S.battery };
       await db.set(K('vault'), await seal(S.dk, enc.encode(JSON.stringify(snap)), AAD));
     },
     /** Puts the saved copy into S. Counters come with it, so re-reading the mailbox does not add the same messages twice. */
@@ -192,6 +192,7 @@ const Vault = (() => {
       if (snap.usage) S.usage = snap.usage;
       S.week = snap.week || null;
       S.apps = snap.apps || { id: 0, time: 0, list: [], asked: 0 };
+      S.icons = snap.icons && typeof snap.icons === 'object' ? snap.icons : {};
       if (snap.rules) S.rules = snap.rules;
       S.requests = snap.requests || [];
       if (snap.where) S.where = snap.where;
@@ -236,7 +237,7 @@ function closeLocally(id) {
 function resetData() {
   S.alerts = []; S.reports = new Map(); S.state = null; S.detail = ''; S.lastStatus = 0;
   S.lastC2P = 0; S.lastP2C = 0;
-  S.usage = { day: '', time: 0, apps: [] }; S.week = null; S.apps = { id: 0, time: 0, list: [], asked: 0 }; S.rules = { version: 0, night: null, school: null, limits: [], sites: [], allow: [], deny: [], places: [] }; S.requests = [];
+  S.usage = { day: '', time: 0, apps: [] }; S.week = null; S.apps = { id: 0, time: 0, list: [], asked: 0 }; S.icons = {}; S.rules = { version: 0, night: null, school: null, limits: [], sites: [], allow: [], deny: [], places: [] }; S.requests = [];
   S.where = { spot: null, asked: 0, none: '', noneTime: 0, n: 0, places: {} }; S.battery = { pct: -1, time: 0 };
 }
 function apply(m, receivedAt) {
@@ -280,6 +281,14 @@ function apply(m, receivedAt) {
       S.apps.time = Math.max(S.apps.time, m.time);
       const more = L.parseApps(m.fragments).filter(a => !S.apps.list.some(x => x.pkg === a.pkg));
       S.apps.list = [...S.apps.list, ...more].slice(0, 200);
+      return 'NONE';
+    }
+    case 'ICONS': { // 0.32: app icons made by the child's phone (never looked up on the internet)
+      const icons = { ...(S.icons || {}) };
+      for (const i of L.parseIcons(m.fragments)) { delete icons[i.pkg]; icons[i.pkg] = i.data; }
+      const keys = Object.keys(icons);
+      for (const k of keys.slice(0, Math.max(0, keys.length - L.MAX_ICONS))) delete icons[k];
+      S.icons = icons;
       return 'NONE';
     }
     case 'USAGE':
@@ -1091,11 +1100,23 @@ function timePage() {
 }
 // ---------- 0.29: «App installate» ----------
 async function askApps() {
-  if (!await sendToChild(L.askAppsMessage(Date.now()))) return false;
+  const missing = S.apps.list.some(a => !(S.icons || {}).hasOwnProperty(a.pkg)); // 0.32: ask for the icons again too
+  if (!await sendToChild(L.askAppsMessage(Date.now(), missing))) return false;
   S.apps.asked = Date.now(); saveSoon();
   return true;
 }
 const whenText = t => { const d = new Date(t); return d.toDateString() === new Date().toDateString() ? 'alle ' + hm(t) : d.getDate() + '/' + (d.getMonth() + 1) + ' alle ' + hm(t); };
+/** 0.32: the app's icon (sent by the child's phone), or its initial on a colour of its own. */
+const TINTS = ['#0F766E', '#2563EB', '#7C3AED', '#DB2777', '#EA580C', '#0891B2', '#65A30D', '#9333EA'];
+function tintOf(pkg) { let x = 0; for (const ch of pkg) x = (x * 31 + ch.charCodeAt(0)) | 0; return TINTS[((x % TINTS.length) + TINTS.length) % TINTS.length]; }
+function initialOf(label) { const m = (label || '').match(/[\p{L}\p{N}]/u); return m ? m[0].toUpperCase() : '?'; }
+function appIcon(a) {
+  const data = (S.icons || {})[a.pkg];
+  if (data) return h('img', { class: 'app-ico', src: 'data:image/webp;base64,' + data, alt: '' });
+  const d = h('div', { class: 'app-ico letter', 'aria-hidden': 'true' }, initialOf(a.label));
+  d.style.background = tintOf(a.pkg);
+  return d;
+}
 function appsPage() {
   const list = S.apps.list;
   if (!list.length && S.child && Date.now() - (S.apps.asked || 0) > 600000) askApps(); // first time: ask
@@ -1123,7 +1144,7 @@ function appsPage() {
     } }, CHOICES.map(c => h('option', { value: String(c), selected: (lim ? lim.minutes : -1) === c }, limitLabel(c))));
     const sub = [used.has(a.pkg) ? 'Oggi ' + dur(used.get(a.pkg)) : '', a.installed ? '' : 'non più nell\'elenco'].filter(Boolean).join(' · ');
     box.append(h('div', { class: 'card app-limit', 'data-name': a.label.toLowerCase() },
-      h('div', {}, h('div', { class: 't' }, limitIcon(lim) + ' ' + a.label), h('div', { class: 's' }, sub)), sel));
+      appIcon(a), h('div', { class: 'grow' }, h('div', { class: 't' }, a.label), h('div', { class: 's' }, (lim ? limitIcon(lim) + ' ' : '') + sub)), sel));
   }
   if (rows.length > 12) {
     // Filtered in place: the page is not redrawn while typing.
@@ -1133,7 +1154,7 @@ function appsPage() {
   }
   out.push(box);
   out.push(h('p', { class: 'caption' }, '«In pausa»: per oggi non si apre, ma tuo figlio può chiederti 15 minuti. «Bloccata»: non si apre e non può chiedere tempo, finché non la sblocchi tu.'));
-  out.push(h('p', { class: 'caption' }, 'Telefono, contatti, sveglia, SOS e Phylax funzionano sempre e non sono nell\'elenco. Arrivano solo i nomi delle app, mai cosa c\'è dentro.'));
+  out.push(h('p', { class: 'caption' }, 'Telefono, contatti, sveglia, SOS e Phylax funzionano sempre e non sono nell\'elenco. Arrivano solo i nomi e le icone delle app (dal telefono di tuo figlio, cifrati), mai cosa c\'è dentro.'));
   return out;
 }
 // ---------- 0.23: site filter ----------

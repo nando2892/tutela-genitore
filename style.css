@@ -171,8 +171,11 @@ ul.plain li { margin: 6px 0; }
 .time-input, .limit-select { font: inherit; padding: 8px 10px; border-radius: 10px; border: 1.5px solid var(--border); background: var(--surface); color: var(--text); }
 .app-limit { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .app-limit .t { font-size: 17px; }
+.app-limit .grow { flex: 1; min-width: 0; }
+.app-ico { width: 40px; height: 40px; border-radius: 10px; flex: none; object-fit: contain; }
+.app-ico.letter { border-radius: 50%; color: #fff; font-weight: 700; font-size: 18px; display: grid; place-items: center; }
 .app-limit .s { color: var(--muted); font-size: 14px; }
-.app-limit .limit-select { max-width: 55%; }
+.app-limit .limit-select { max-width: 45%; flex: none; }
 /* 0.23: site filter */
 .cat-row { padding: 8px 0; }
 .site-row { display: flex; justify-content: space-between; align-items: center; padding: 6px 0; border-bottom: 1px solid var(--border); }
