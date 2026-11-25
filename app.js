@@ -8,7 +8,7 @@ import * as L from './link.js';
 import * as Bio from './bio.js';
 import * as QR from './qr.js';
 
-const VERSION = '0.27';
+const VERSION = '0.28';
 const SILENT_MS = 60 * 60 * 1000;            // like LinkPolicy: warning after 1 hour without messages
 const MAX_AGE_S = 24 * 60 * 60;              // reject messages published > 24 h after they were written (replays)
 const LOCK_AFTER_MS = 5 * 60 * 1000;         // PIN again after 5 minutes in the background
@@ -61,7 +61,7 @@ const S = {
   pushState: null, subscribed: false, pushSentEndpoint: null, pushError: '',
   dk: null, dkRaw: null, ready: false, // 0.15: data key once unlocked; ready = saved copy loaded, may connect
   // 0.22: screen time. usage = today's minutes from the child; rules = what we last sent; requests = «15 minuti in più?»
-  usage: { day: '', time: 0, apps: [] }, rules: { version: 0, night: null, school: null, limits: [], sites: [], allow: [], deny: [], places: [] }, requests: [], editRules: null,
+  week: null, usage: { day: '', time: 0, apps: [] }, rules: { version: 0, night: null, school: null, limits: [], sites: [], allow: [], deny: [], places: [] }, requests: [], editRules: null,
   // 0.24: «Dov'è?»: only the last answer (no history), the last «arrivato»/«uscito» per safe place.
   where: { spot: null, asked: 0, none: '', noneTime: 0, n: 0, places: {} }, placeForm: false,
   battery: { pct: -1, time: 0 }, // 0.25: last battery level from the child's heartbeat
@@ -174,7 +174,7 @@ const Vault = (() => {
       if (!S.dk) return;
       const snap = { v: 1, alerts: S.alerts, reports: [...S.reports.values()], state: S.state, detail: S.detail,
         lastStatus: S.lastStatus, lastSeen: S.lastSeen, lastC2P: S.lastC2P, lastP2C: S.lastP2C,
-        usage: S.usage, rules: S.rules, requests: S.requests, where: S.where, battery: S.battery };
+        usage: S.usage, week: S.week, rules: S.rules, requests: S.requests, where: S.where, battery: S.battery };
       await db.set(K('vault'), await seal(S.dk, enc.encode(JSON.stringify(snap)), AAD));
     },
     /** Puts the saved copy into S. Counters come with it, so re-reading the mailbox does not add the same messages twice. */
@@ -190,6 +190,7 @@ const Vault = (() => {
       S.lastSeen = Math.max(S.lastSeen, snap.lastSeen || 0);
       S.lastC2P = snap.lastC2P || 0; S.lastP2C = snap.lastP2C || 0;
       if (snap.usage) S.usage = snap.usage;
+      S.week = snap.week || null;
       if (snap.rules) S.rules = snap.rules;
       S.requests = snap.requests || [];
       if (snap.where) S.where = snap.where;
@@ -234,7 +235,7 @@ function closeLocally(id) {
 function resetData() {
   S.alerts = []; S.reports = new Map(); S.state = null; S.detail = ''; S.lastStatus = 0;
   S.lastC2P = 0; S.lastP2C = 0;
-  S.usage = { day: '', time: 0, apps: [] }; S.rules = { version: 0, night: null, school: null, limits: [], sites: [], allow: [], deny: [], places: [] }; S.requests = [];
+  S.usage = { day: '', time: 0, apps: [] }; S.week = null; S.rules = { version: 0, night: null, school: null, limits: [], sites: [], allow: [], deny: [], places: [] }; S.requests = [];
   S.where = { spot: null, asked: 0, none: '', noneTime: 0, n: 0, places: {} }; S.battery = { pct: -1, time: 0 };
 }
 function apply(m, receivedAt) {
@@ -265,6 +266,10 @@ function apply(m, receivedAt) {
       if (m.outcome === L.BATTERY_LOW) return 'BATTERY_LOW';
       return changed || !m.heartbeat ? 'STATUS' : 'NONE';
     }
+    case 'WEEK': // 0.28: the summary of the week, sent on Sunday evening
+      if (S.week && (m.time < S.week.time || m.text < S.week.weekStart)) return 'NONE';
+      S.week = { weekStart: m.text, time: m.time, lines: (m.fragments || []).slice(0, 60) };
+      return 'NONE';
     case 'USAGE':
       if (m.time < S.usage.time) return 'NONE';
       S.usage = { day: m.text, time: m.time, apps: L.parseUsage(m.fragments) };
@@ -412,11 +417,19 @@ async function pollMailbox() {
 }
 const MBOX_DOWN = 'Casella non raggiungibile: nuovo tentativo tra poco.';
 function connect() { if (S.pair && S.ready) enqueue(() => pollMailbox()); }
-// Every 15 s while the app is on screen (in the background the iPhone wakes it by Web Push, straight from the child).
-setInterval(() => { if (document.visibilityState === 'visible') connect(); scheduleRender(); }, 15000);
+// 0.28: fewer requests (Cloudflare bills by request). On screen: every 30 s, every 10 s for 3 minutes after sending
+// something to the child (answers come quickly), and at once when a Web Push arrives (the service worker tells us).
+let lastCommand = 0, lastPoll = 0;
+setInterval(() => {
+  const fast = Date.now() - lastCommand < 180000 || (S.pair && !S.child); // pairing: the child's hello comes soon
+  if (document.visibilityState === 'visible' && Date.now() - lastPoll >= (fast ? 9500 : 29500)) { lastPoll = Date.now(); connect(); }
+  scheduleRender();
+}, 5000);
+if ('serviceWorker' in navigator) navigator.serviceWorker.addEventListener('message', e => { if (e.data === 'phylax-push') { lastPoll = Date.now(); connect(); } });
 
 /** Seals one command for the child (p2c), keeps it in the outbox until the mailbox takes it. */
 async function sendToChild(plain) {
+  lastCommand = Date.now();
   if (!await ensureKeys()) return false;
   S.sent = L.nextCounter(S.sent, Date.now());
   await db.set(K('sent'), S.sent);
@@ -720,6 +733,7 @@ function page(r) {
   if (name === 'advanced') return advancedPage();
   if (name === 'time') return timePage();
   if (name === 'sites') return sitesPage();
+  if (name === 'week') return weekPage();
   if (name === 'talk') return talkPage(arg ? decodeURIComponent(arg) : null);
   if (name === 'child') return [...childPage(), tabBar('child')];
   if (name === 'settings') return [...settingsPage(), tabBar('settings')];
@@ -934,6 +948,9 @@ function childPage() {
   out.push(whereCard());
   out.push(h('div', { class: 'section' }, 'Tempo di oggi'));
   out.push(usageCard());
+  out.push(h('div', { class: 'section' }, 'La settimana'));
+  const wk = S.week ? L.parseWeek(S.week.weekStart, S.week.lines) : null;
+  out.push(navRow('📊', 'Resoconto della settimana', wk ? weekRange(wk.weekStart) + (wk.average >= 0 ? ' · in media ' + dur(wk.average) + ' al giorno' : '') : 'Arriva la domenica sera', () => go('week')));
   out.push(h('div', { class: 'section' }, 'Siti'));
   out.push(navRow('🌐', 'Filtro siti', sitesSummary(S.rules), () => { S.editRules = null; go('sites'); }, true));
   out.push(h('div', { class: 'section' }, 'Parlarne'));
@@ -1044,7 +1061,7 @@ function timePage() {
   }
   out.push(h('button', { class: 'btn primary', onclick: async ev => {
     ev.target.disabled = true;
-    if (await sendRules(e)) { S.editRules = null; toast('Regole inviate: valgono entro circa 30 secondi', 4000); go('child'); }
+    if (await sendRules(e)) { S.editRules = null; toast('Regole inviate: valgono entro un paio di minuti', 4000); go('child'); }
     else { ev.target.disabled = false; toast('Prima collega il telefono di tuo figlio'); }
   } }, 'Salva e manda al telefono di tuo figlio'));
   out.push(h('p', { class: 'caption' }, 'Telefono, contatti, sveglia e Phylax funzionano sempre, anche di notte e a scuola, così tuo figlio può sempre chiamarti.'));
@@ -1091,7 +1108,7 @@ function sitesPage() {
   out.push(h('button', { class: 'btn primary', onclick: async ev => {
     ev.target.disabled = true;
     e.sitesChosen = true;
-    if (await sendRules(e)) { S.editRules = null; toast('Filtro inviato: vale entro circa 30 secondi', 4000); go('child'); }
+    if (await sendRules(e)) { S.editRules = null; toast('Filtro inviato: vale entro un paio di minuti', 4000); go('child'); }
     else { ev.target.disabled = false; toast('Prima collega il telefono di tuo figlio'); }
   } }, 'Salva e manda al telefono di tuo figlio'));
   out.push(h('p', { class: 'caption' }, 'Se sul telefono di tuo figlio è attivo «Filtro siti in tutte le app», il blocco vale anche dentro le app e i giochi, non solo nel browser. Si attiva dalla configurazione di Phylax sul suo telefono.'));
@@ -1246,7 +1263,7 @@ function reportPage(id) {
   out.push(h('button', { class: 'btn outline', onclick: e => { e.target.disabled = true; closeReport(id, L.OUTCOME_OK); } }, language ? 'Questa lingua va bene · chiudi e cancella' : 'Tutto ok · chiudi e cancella'));
   if (language) out.push(h('p', { class: 'caption' }, 'Per questa chat Phylax non avviserà più solo per la lingua; le parole a rischio continuano a far partire gli avvisi.'));
   out.push(h('button', { class: 'btn primary', onclick: e => { e.target.disabled = true; closeReport(id, L.OUTCOME_INTERVENE); } }, 'Intervengo · chiudi e cancella'));
-  out.push(h('p', { class: 'caption' }, 'Chiudendo, questi messaggi si cancellano qui e, entro circa 30 secondi, anche sul telefono di tuo figlio.'));
+  out.push(h('p', { class: 'caption' }, 'Chiudendo, questi messaggi si cancellano qui e, entro un paio di minuti, anche sul telefono di tuo figlio.'));
   return out;
 }
 
@@ -1299,6 +1316,68 @@ function pairPage() {
   return out;
 }
 
+// ---------- 0.28: «La settimana» ----------
+const MONTHS = ['gennaio', 'febbraio', 'marzo', 'aprile', 'maggio', 'giugno', 'luglio', 'agosto', 'settembre', 'ottobre', 'novembre', 'dicembre'];
+function weekRange(monday) {
+  const d = new Date(monday + 'T12:00:00'); if (isNaN(d)) return '';
+  const e = new Date(d); e.setDate(d.getDate() + 6);
+  return 'Dal ' + d.getDate() + ' ' + MONTHS[d.getMonth()] + ' al ' + e.getDate() + ' ' + MONTHS[e.getMonth()];
+}
+const change = (now, before) => before <= 0 ? (now > 0 ? 'nuova' : '') : (p => Math.abs(p) < 5 ? 'uguale' : (p > 0 ? '+' : '−') + Math.abs(p) + '%')(Math.round(100 * (now - before) / before));
+/** Same choice as WeekActivity.tip: advice for the most frequent alert, else about the time trend, else a calm-week tip. */
+function weekTip(w) {
+  if (!advice) return null;
+  const low = (w.topKind || '').toLowerCase();
+  const t = w.topKind ? advice.topics.find(x => x.match.some(m => low.includes(m))) : null;
+  if (t) return [t.title, t.points[0]];
+  if (!advice.week) return null;
+  if (w.trend !== null && w.trend >= 10) return ['', advice.week.more];
+  if (w.trend !== null && w.trend <= -10) return ['', advice.week.less];
+  const idx = Math.floor((Math.round(new Date(w.weekStart + 'T00:00:00Z').getTime() / 86400000) - 4) / 7);
+  return ['', advice.week.calm[((idx % advice.week.calm.length) + advice.week.calm.length) % advice.week.calm.length]];
+}
+function bars(rows, max) {
+  return rows.map(([label, minutes, note]) => {
+    const fill = h('div', { class: 'bar-fill' });
+    fill.style.width = Math.max(minutes > 0 ? 3 : 0, Math.round(100 * Math.min(1, minutes / Math.max(1, max)))) + '%';
+    return [h('div', { class: 'usage-row' }, h('span', { class: 'u-name' }, label), h('span', { class: 'u-min' }, (minutes >= 0 ? dur(minutes) : '') + (note ? (minutes >= 0 ? ' · ' : '') + note : ''))),
+      h('div', { class: 'bar' }, fill)];
+  }).flat();
+}
+function weekPage() {
+  loadAdvice();
+  const w = S.week ? L.parseWeek(S.week.weekStart, S.week.lines) : null;
+  const out = [header('La settimana', 'child')];
+  if (!w) { out.push(h('div', { class: 'card empty' }, h('b', {}, 'Ancora nessun resoconto'), 'Arriva la domenica sera dal telefono di tuo figlio, cifrato come gli avvisi.')); return out; }
+  out.push(h('p', { class: 'sub' }, weekRange(w.weekStart)));
+  out.push(h('div', { class: 'section' }, 'Tempo davanti allo schermo'));
+  const DAYS = ['Lun', 'Mar', 'Mer', 'Gio', 'Ven', 'Sab', 'Dom'];
+  if (w.average < 0) out.push(h('div', { class: 'card' }, h('p', {}, 'Nessun dato: sul telefono di tuo figlio manca «Consenti accesso ai dati di utilizzo».')));
+  else {
+    const tw = L.trendWord(w.trend);
+    out.push(h('div', { class: 'card' }, h('h3', { class: 'card-title' }, 'In media ' + dur(w.average) + ' al giorno'),
+      h('p', { class: 'caption' }, 'In tutto ' + dur(w.total) + (tw ? ' · ' + tw : '') + '.'),
+      ...bars(w.days.map((d, i) => [DAYS[i], d < 0 ? 0 : d, d < 0 ? 'nessun dato' : '']), Math.max(...w.days))));
+  }
+  if (w.apps.length) {
+    out.push(h('div', { class: 'section' }, 'App più usate'));
+    out.push(h('div', { class: 'card' }, ...bars(w.apps.map(a => [a.label, a.minutes, change(a.minutes, a.before)]), w.apps[0].minutes)));
+  }
+  out.push(h('div', { class: 'section' }, 'Avvisi'));
+  out.push(w.alerts === 0
+    ? h('div', { class: 'card' }, h('p', {}, w.alertsBefore === 0 ? 'Nessun avviso, come la settimana prima.' : 'Nessun avviso (la settimana prima: ' + w.alertsBefore + ').'))
+    : h('div', { class: 'card' }, h('h3', { class: 'card-title' }, w.alerts + (w.alerts === 1 ? ' avviso' : ' avvisi') + ' (la settimana prima: ' + w.alertsBefore + ')'),
+      h('ul', { class: 'plain' }, ...w.kinds.filter(k => k.count || k.before).map(k => h('li', {}, k.category + ': ' + k.count + (k.before !== k.count ? '  (prima ' + k.before + ')' : ''))))));
+  const tip = weekTip(w);
+  if (tip) {
+    out.push(h('div', { class: 'section' }, 'Il consiglio della settimana'));
+    out.push(h('div', { class: 'card' }, tip[0] ? h('h3', { class: 'card-title' }, tip[0]) : null, h('p', {}, tip[1]),
+      h('button', { class: 'btn', onclick: () => go('talk' + (w.topKind ? '/' + encodeURIComponent(w.topKind) : '')) }, 'Come parlarne ›')));
+  }
+  out.push(h('p', { class: 'caption' }, 'Solo numeri: Phylax non manda le chat, i siti visitati o dove è stato. Arrivato il ' + hm(S.week.time) + '.'));
+  return out;
+}
+
 // ---------- 0.26: «Come parlarne» (advice.json, the same file the Android parent app uses) ----------
 let advice = null, adviceAsked = false;
 function loadAdvice() {
@@ -1346,7 +1425,7 @@ function notifyPage() {
   }
   const state = S.pushState === 'expired' ? 'Notifiche da riattivare: il permesso è scaduto o è stato tolto.'
     : S.subscribed && S.pushState === 'ok' ? 'Notifiche attive. Il telefono di tuo figlio ha confermato.'
-    : S.subscribed && S.child ? 'Permesso dato. In attesa della conferma del telefono di tuo figlio (entro circa 30 secondi).'
+    : S.subscribed && S.child ? 'Permesso dato. In attesa della conferma del telefono di tuo figlio (entro un paio di minuti).'
     : 'Notifiche spente.';
   out.push(h('div', { class: 'card' },
     h('p', { class: 'card-head' }, state),

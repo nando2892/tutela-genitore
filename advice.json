@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "note": "0.26: consigli per parlarne con il ragazzo. Testi originali di Phylax; non sostituiscono un professionista. Stesso file per l'app web e per l'app genitore Android.",
+  "note": "0.26: consigli (0.28: anche il consiglio della settimana) per parlarne con il ragazzo. Testi originali di Phylax; non sostituiscono un professionista. Stesso file per l'app web e per l'app genitore Android.",
   "intro": "Phylax funziona meglio come un patto, non come un controllo di nascosto. Qui trovi come presentarlo, come parlarne quando arriva un avviso e a chi chiedere aiuto.",
   "sections": [
     {
@@ -50,7 +50,10 @@
   ],
   "topics": [
     {
-      "match": ["adescamento", "incontro"],
+      "match": [
+        "adescamento",
+        "incontro"
+      ],
       "title": "Un adulto o una persona conosciuta online",
       "points": [
         "Chiedi chi è questa persona e come vi siete conosciuti, senza giudicare.",
@@ -60,7 +63,10 @@
       ]
     },
     {
-      "match": ["immagini intime", "ricatto"],
+      "match": [
+        "immagini intime",
+        "ricatto"
+      ],
       "title": "Foto intime: richieste o ricatti",
       "points": [
         "Non dare la colpa: chi ricatta conta proprio sulla vergogna.",
@@ -69,7 +75,10 @@
       ]
     },
     {
-      "match": ["bullismo", "minaccia"],
+      "match": [
+        "bullismo",
+        "minaccia"
+      ],
       "title": "Bullismo o minacce",
       "points": [
         "Ascolta tutto senza interrompere e chiedi da quanto va avanti.",
@@ -79,7 +88,10 @@
       ]
     },
     {
-      "match": ["sofferenza", "alimentare"],
+      "match": [
+        "sofferenza",
+        "alimentare"
+      ],
       "title": "Sofferenza, tristezza, cibo",
       "points": [
         "Questo è il momento di esserci, non di avere risposte. «Mi sembri giù, vuoi parlarne?»",
@@ -88,7 +100,12 @@
       ]
     },
     {
-      "match": ["droghe", "azzardo", "challenge", "sfida"],
+      "match": [
+        "droghe",
+        "azzardo",
+        "challenge",
+        "sfida"
+      ],
       "title": "Droghe, scommesse, sfide pericolose",
       "points": [
         "Chiedi cosa sa e cosa gira tra i suoi amici: spesso ne sanno più di noi.",
@@ -97,7 +114,11 @@
       ]
     },
     {
-      "match": ["odio", "armi", "violenza"],
+      "match": [
+        "odio",
+        "armi",
+        "violenza"
+      ],
       "title": "Odio, armi, violenza",
       "points": [
         "Chiedi dove l'ha visto e cosa ne pensa, prima di dire la tua.",
@@ -105,7 +126,10 @@
       ]
     },
     {
-      "match": ["truffa", "account"],
+      "match": [
+        "truffa",
+        "account"
+      ],
       "title": "Truffe e account rubati",
       "points": [
         "Cambiate subito la password e attivate la verifica in due passaggi.",
@@ -113,7 +137,9 @@
       ]
     },
     {
-      "match": ["sos"],
+      "match": [
+        "sos"
+      ],
       "title": "Ha premuto SOS",
       "points": [
         "Chiamalo subito. Se non risponde e hai attivato la posizione, guarda «Dov'è?».",
@@ -121,7 +147,9 @@
       ]
     },
     {
-      "match": ["nuova app"],
+      "match": [
+        "nuova app"
+      ],
       "title": "Ha installato una nuova app",
       "points": [
         "Chiedigli a cosa serve e fattela mostrare: spesso basta questo.",
@@ -133,5 +161,15 @@
     "Pericolo immediato: 112",
     "Telefono Azzurro, per ragazzi e genitori: 19696 (anche chat su azzurro.it)",
     "Polizia Postale, per adescamento, ricatti e truffe: commissariatodips.it"
-  ]
+  ],
+  "week": {
+    "more": "Il tempo davanti allo schermo è salito. Invece di togliere, chiedigli quale app l'ha preso di più questa settimana e decidete insieme un limite per quella.",
+    "less": "Il tempo è sceso: diglielo! Notare i progressi funziona più dei rimproveri.",
+    "calm": [
+      "Settimana tranquilla: è un buon momento per chiedergli quale app gli piace di più e fartela mostrare.",
+      "Ricordagli che il pulsante SOS c'è sempre, anche solo per chiamarti quando qualcosa non va.",
+      "Provate una sera senza telefoni per tutti, genitori compresi: l'esempio conta più delle regole.",
+      "Chiedigli se c'è qualcuno online che lo mette a disagio: è più facile parlarne quando va tutto bene."
+    ]
+  }
 }

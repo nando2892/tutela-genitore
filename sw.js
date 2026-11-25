@@ -1,5 +1,5 @@
 // Offline app shell only. Never caches the mailbox (alerts are rebuilt from the ciphertext at each opening).
-const CACHE = 'phylax-genitore-0.27';
+const CACHE = 'phylax-genitore-0.28';
 const SHELL = ['./', 'index.html', 'style.css', 'app.js', 'link.js', 'bio.js', 'qr.js', 'advice.json', 'manifest.json',
   'icons/icon.svg', 'icons/mark.svg', 'fonts/Baloo2-wght.ttf', 'icons/icon-192.png', 'icons/icon-512.png', 'icons/maskable-192.png', 'icons/maskable-512.png', 'icons/apple-touch-icon.png'];
 
@@ -27,6 +27,8 @@ self.addEventListener('push', e => {
   try { const t = e.data && e.data.text(); if (PUSH_TEXTS.includes(t)) body = t; } catch { /* keep the fixed text */ }
   e.waitUntil(Promise.all([
     self.registration.showNotification('Phylax Genitore', { body, tag: 'tutela', icon: 'icons/icon-192.png' }),
+    // 0.28: an open app reads the mailbox at once instead of waiting for its next round.
+    self.clients.matchAll({ type: 'window' }).then(list => list.forEach(c => c.postMessage('phylax-push'))),
     self.navigator.setAppBadge ? self.navigator.setAppBadge().catch(() => {}) : Promise.resolve(),
   ]));
 });

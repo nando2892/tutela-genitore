@@ -9,7 +9,7 @@ const subtle = globalThis.crypto.subtle;
 export const CODE_PREFIX = 'TG1.', WIRE_PREFIX = 'T1.';
 export const C2P = 1, P2C = 2, WIRE_VERSION = 1, TOPIC_LENGTH = 32;
 // 0.22: USAGE (child: minutes per app), RULES (parent: screen-time rules), EXTRA (more time: asked / granted / refused).
-export const TYPES = ['ALERT', 'CASE_OPEN', 'CASE_FRAGMENTS', 'STATUS', 'CLOSE_CASE', 'PUSH', 'USAGE', 'RULES', 'EXTRA', 'LOCATION'];
+export const TYPES = ['ALERT', 'CASE_OPEN', 'CASE_FRAGMENTS', 'STATUS', 'CLOSE_CASE', 'PUSH', 'USAGE', 'RULES', 'EXTRA', 'LOCATION', 'WEEK']; // 0.28: WEEK = weekly summary
 export const EXTRA_ASK = 0, EXTRA_YES = 1, EXTRA_NO = 2;
 /** 0.24 LOCATION: parent asks (LOC_ASK), child answers once (LOC_HERE «lat,lon,metri,ora» / LOC_NONE why) or a safe place event. */
 export const LOC_ASK = 0, LOC_HERE = 1, LOC_NONE = 2, LOC_PLACE = 3;
@@ -267,6 +267,32 @@ export function parseWhere(text) {
   return { lat, lon, meters: meters || 0, fixTime };
 }
 /** USAGE fragments «label|minutes|package» -> [{ label, minutes, pkg }]. */
+/** 0.28: weekly summary (WeekSummary.java): d|day|min, p|prevTotal|prevDays, a|label|min|pkg|before, c|kind|count|before. */
+export function parseWeek(weekStart, lines) {
+  const w = { weekStart: weekStart || '', days: [-1, -1, -1, -1, -1, -1, -1], prevTotal: -1, prevDays: 0, apps: [], kinds: [] };
+  const n = v => { const x = parseInt(v, 10); return Number.isFinite(x) ? Math.max(0, x) : null; };
+  for (const line of lines || []) {
+    const f = String(line).split('|');
+    if (f[0] === 'd' && f.length >= 3) { const i = parseInt(f[1], 10), v = n(f[2]); if (i >= 0 && i < 7 && v !== null) w.days[i] = v; }
+    else if (f[0] === 'p' && f.length >= 3) { const t = n(f[1]), d = n(f[2]); if (t !== null && d !== null) { w.prevTotal = t; w.prevDays = Math.min(7, d); } }
+    else if (f[0] === 'a' && f.length >= 5 && w.apps.length < 10) { const m = n(f[2]), b = n(f[4]); if (m !== null && b !== null) w.apps.push({ label: f[1], minutes: m, pkg: f[3], before: b }); }
+    else if (f[0] === 'c' && f.length >= 4 && w.kinds.length < 12) { const c = n(f[2]), b = n(f[3]); if (c !== null && b !== null) w.kinds.push({ category: f[1], count: c, before: b }); }
+  }
+  const known = w.days.filter(d => d >= 0);
+  w.total = known.reduce((s, d) => s + d, 0);
+  w.average = known.length ? Math.round(w.total / known.length) : -1;
+  const prevAvg = w.prevTotal < 0 || !w.prevDays ? -1 : Math.round(w.prevTotal / w.prevDays);
+  w.trend = w.average < 0 || prevAvg <= 0 ? null : Math.round(100 * (w.average - prevAvg) / prevAvg);
+  w.alerts = w.kinds.reduce((s, k) => s + k.count, 0);
+  w.alertsBefore = w.kinds.reduce((s, k) => s + k.before, 0);
+  w.topKind = (w.kinds.find(k => k.count > 0) || {}).category || null;
+  return w;
+}
+export function trendWord(pct) {
+  if (pct === null || pct === undefined) return '';
+  if (Math.abs(pct) < 5) return 'come la settimana prima';
+  return (pct > 0 ? '+' : '−') + Math.abs(pct) + '% rispetto alla settimana prima';
+}
 export function parseUsage(fragments) {
   return (fragments || []).map(f => { const p = f.split('|'); return { label: p[0] || p[2], minutes: parseInt(p[1], 10) || 0, pkg: p[2] || p[0] }; });
 }
