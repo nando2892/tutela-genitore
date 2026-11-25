@@ -8,7 +8,7 @@ import * as L from './link.js';
 import * as Bio from './bio.js';
 import * as QR from './qr.js';
 
-const VERSION = '0.28';
+const VERSION = '0.29';
 const SILENT_MS = 60 * 60 * 1000;            // like LinkPolicy: warning after 1 hour without messages
 const MAX_AGE_S = 24 * 60 * 60;              // reject messages published > 24 h after they were written (replays)
 const LOCK_AFTER_MS = 5 * 60 * 1000;         // PIN again after 5 minutes in the background
@@ -61,7 +61,7 @@ const S = {
   pushState: null, subscribed: false, pushSentEndpoint: null, pushError: '',
   dk: null, dkRaw: null, ready: false, // 0.15: data key once unlocked; ready = saved copy loaded, may connect
   // 0.22: screen time. usage = today's minutes from the child; rules = what we last sent; requests = «15 minuti in più?»
-  week: null, usage: { day: '', time: 0, apps: [] }, rules: { version: 0, night: null, school: null, limits: [], sites: [], allow: [], deny: [], places: [] }, requests: [], editRules: null,
+  week: null, apps: { id: 0, time: 0, list: [], asked: 0 }, usage: { day: '', time: 0, apps: [] }, rules: { version: 0, night: null, school: null, limits: [], sites: [], allow: [], deny: [], places: [] }, requests: [], editRules: null,
   // 0.24: «Dov'è?»: only the last answer (no history), the last «arrivato»/«uscito» per safe place.
   where: { spot: null, asked: 0, none: '', noneTime: 0, n: 0, places: {} }, placeForm: false,
   battery: { pct: -1, time: 0 }, // 0.25: last battery level from the child's heartbeat
@@ -174,7 +174,7 @@ const Vault = (() => {
       if (!S.dk) return;
       const snap = { v: 1, alerts: S.alerts, reports: [...S.reports.values()], state: S.state, detail: S.detail,
         lastStatus: S.lastStatus, lastSeen: S.lastSeen, lastC2P: S.lastC2P, lastP2C: S.lastP2C,
-        usage: S.usage, week: S.week, rules: S.rules, requests: S.requests, where: S.where, battery: S.battery };
+        usage: S.usage, week: S.week, apps: S.apps, rules: S.rules, requests: S.requests, where: S.where, battery: S.battery };
       await db.set(K('vault'), await seal(S.dk, enc.encode(JSON.stringify(snap)), AAD));
     },
     /** Puts the saved copy into S. Counters come with it, so re-reading the mailbox does not add the same messages twice. */
@@ -191,6 +191,7 @@ const Vault = (() => {
       S.lastC2P = snap.lastC2P || 0; S.lastP2C = snap.lastP2C || 0;
       if (snap.usage) S.usage = snap.usage;
       S.week = snap.week || null;
+      S.apps = snap.apps || { id: 0, time: 0, list: [], asked: 0 };
       if (snap.rules) S.rules = snap.rules;
       S.requests = snap.requests || [];
       if (snap.where) S.where = snap.where;
@@ -235,7 +236,7 @@ function closeLocally(id) {
 function resetData() {
   S.alerts = []; S.reports = new Map(); S.state = null; S.detail = ''; S.lastStatus = 0;
   S.lastC2P = 0; S.lastP2C = 0;
-  S.usage = { day: '', time: 0, apps: [] }; S.week = null; S.rules = { version: 0, night: null, school: null, limits: [], sites: [], allow: [], deny: [], places: [] }; S.requests = [];
+  S.usage = { day: '', time: 0, apps: [] }; S.week = null; S.apps = { id: 0, time: 0, list: [], asked: 0 }; S.rules = { version: 0, night: null, school: null, limits: [], sites: [], allow: [], deny: [], places: [] }; S.requests = [];
   S.where = { spot: null, asked: 0, none: '', noneTime: 0, n: 0, places: {} }; S.battery = { pct: -1, time: 0 };
 }
 function apply(m, receivedAt) {
@@ -270,6 +271,17 @@ function apply(m, receivedAt) {
       if (S.week && (m.time < S.week.time || m.text < S.week.weekStart)) return 'NONE';
       S.week = { weekStart: m.text, time: m.time, lines: (m.fragments || []).slice(0, 60) };
       return 'NONE';
+    case 'APPS': { // 0.29: installed apps, maybe in several parts with the same id
+      if (!(m.fragments || []).length && !m.outcome) return 'NONE';
+      if (m.caseId !== S.apps.id) {
+        if (m.time < S.apps.time) return 'NONE'; // an older list arriving late
+        S.apps = { id: m.caseId, time: m.time, list: [], asked: S.apps.asked || 0 };
+      }
+      S.apps.time = Math.max(S.apps.time, m.time);
+      const more = L.parseApps(m.fragments).filter(a => !S.apps.list.some(x => x.pkg === a.pkg));
+      S.apps.list = [...S.apps.list, ...more].slice(0, 200);
+      return 'NONE';
+    }
     case 'USAGE':
       if (m.time < S.usage.time) return 'NONE';
       S.usage = { day: m.text, time: m.time, apps: L.parseUsage(m.fragments) };
@@ -734,6 +746,7 @@ function page(r) {
   if (name === 'time') return timePage();
   if (name === 'sites') return sitesPage();
   if (name === 'week') return weekPage();
+  if (name === 'apps') return appsPage();
   if (name === 'talk') return talkPage(arg ? decodeURIComponent(arg) : null);
   if (name === 'child') return [...childPage(), tabBar('child')];
   if (name === 'settings') return [...settingsPage(), tabBar('settings')];
@@ -948,6 +961,8 @@ function childPage() {
   out.push(whereCard());
   out.push(h('div', { class: 'section' }, 'Tempo di oggi'));
   out.push(usageCard());
+  out.push(h('div', { class: 'section' }, 'App installate')); // 0.29
+  out.push(navRow('▦', 'App sul telefono di tuo figlio', (S.apps.list.length ? S.apps.list.length + ' app' : 'Tocca per vederle') + ' · limita o blocca' + (S.rules.limits.length ? ' · ' + limitCounts(S.rules) : ''), () => go('apps')));
   out.push(h('div', { class: 'section' }, 'La settimana'));
   const wk = S.week ? L.parseWeek(S.week.weekStart, S.week.lines) : null;
   out.push(navRow('📊', 'Resoconto della settimana', wk ? weekRange(wk.weekStart) + (wk.average >= 0 ? ' · in media ' + dur(wk.average) + ' al giorno' : '') : 'Arriva la domenica sera', () => go('week')));
@@ -969,8 +984,17 @@ function childPage() {
 const today = () => { const d = new Date(); return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()); };
 const hhmm = m => pad(Math.floor(m / 60)) + ':' + pad(m % 60);
 const dur = m => m < 60 ? m + ' min' : m % 60 === 0 ? (m / 60) + ' h' : Math.floor(m / 60) + ' h ' + (m % 60) + ' min';
-const limitLabel = m => m < 0 ? 'Nessun limite' : m === 0 ? 'In pausa tutto il giorno' : dur(m) + ' al giorno';
-const CHOICES = [-1, 15, 30, 45, 60, 90, 120, 180, 0];
+const limitLabel = m => m === L.LOCKED ? 'Bloccata: non si può aprire' : m < 0 ? 'Nessun limite' : m === 0 ? 'In pausa tutto il giorno' : dur(m) + ' al giorno';
+const CHOICES = [-1, 15, 30, 45, 60, 90, 120, 180, 0, L.LOCKED]; // 0.29: + «Bloccata»
+const limitNote = l => !l ? '' : l.minutes === L.LOCKED ? 'bloccata' : l.minutes === 0 ? 'in pausa' : 'limite ' + dur(l.minutes);
+const limitIcon = l => !l ? '◷' : l.minutes === L.LOCKED ? '⛔' : l.minutes === 0 ? '⏸' : '⏱';
+function limitCounts(r) {
+  const locked = r.limits.filter(l => l.minutes === L.LOCKED).length, limited = r.limits.length - locked;
+  const p = [];
+  if (locked) p.push(locked + (locked === 1 ? ' bloccata' : ' bloccate'));
+  if (limited) p.push(limited + ' con limite');
+  return p.join(' · ');
+}
 // 0.27: school mode. Days as bits, Monday = 1 (as on the phone).
 const DAYS = ['lun', 'mar', 'mer', 'gio', 'ven', 'sab', 'dom'];
 const schoolDays = m => m === 31 ? 'lun–ven' : m === 63 ? 'lun–sab' : DAYS.filter((_, i) => m & (1 << i)).join(', ');
@@ -978,7 +1002,7 @@ function rulesSummary(r) {
   const parts = [];
   if (r.night) parts.push('Notte ' + hhmm(r.night[0]) + '–' + hhmm(r.night[1]));
   if (r.school) parts.push('Scuola ' + schoolDays(r.school.days) + ' ' + hhmm(r.school.start) + '–' + hhmm(r.school.end));
-  if (r.limits.length) parts.push(r.limits.length + (r.limits.length === 1 ? ' app con limite' : ' app con limite'));
+  if (r.limits.length) parts.push(limitCounts(r));
   return parts.length ? parts.join(' · ') : 'Nessuna regola';
 }
 function usageCard() {
@@ -996,7 +1020,7 @@ function usageCard() {
       const bar = h('div', { class: 'bar-fill' + (over ? ' over' : '') });
       bar.style.width = Math.max(3, Math.round(100 * Math.min(1, a.minutes / max))) + '%';
       card.append(h('div', { class: 'usage-row' }, h('span', { class: 'u-name' }, a.label),
-        h('span', { class: 'u-min' }, dur(a.minutes) + (lim ? ' · ' + (lim.minutes === 0 ? 'in pausa' : 'limite ' + dur(lim.minutes)) : ''))),
+        h('span', { class: 'u-min' }, dur(a.minutes) + (lim ? ' · ' + limitNote(lim) : ''))),
         h('div', { class: 'bar' }, bar));
     }
     card.append(h('p', { class: 'caption' }, 'Aggiornato alle ' + hm(S.usage.time) + '.'));
@@ -1052,9 +1076,7 @@ function timePage() {
   for (const [pkg, label] of known) {
     const lim = e.limits.find(l => l.pkg === pkg);
     const sel = h('select', { class: 'limit-select', 'aria-label': 'Limite per ' + label, onchange: ev => {
-      const v = Number(ev.target.value);
-      e.limits = e.limits.filter(l => l.pkg !== pkg);
-      if (v >= 0) e.limits.push({ pkg, label, minutes: v });
+      e.limits = L.setLimit(e.limits, pkg, label, Number(ev.target.value));
     } }, CHOICES.map(c => h('option', { value: String(c), selected: (lim ? lim.minutes : -1) === c }, limitLabel(c))));
     out.push(h('div', { class: 'card app-limit' }, h('div', {}, h('div', { class: 't' }, label),
       h('div', { class: 's' }, used.has(pkg) ? 'Oggi ' + dur(used.get(pkg)) : '')), sel));
@@ -1065,6 +1087,53 @@ function timePage() {
     else { ev.target.disabled = false; toast('Prima collega il telefono di tuo figlio'); }
   } }, 'Salva e manda al telefono di tuo figlio'));
   out.push(h('p', { class: 'caption' }, 'Telefono, contatti, sveglia e Phylax funzionano sempre, anche di notte e a scuola, così tuo figlio può sempre chiamarti.'));
+  return out;
+}
+// ---------- 0.29: «App installate» ----------
+async function askApps() {
+  if (!await sendToChild(L.askAppsMessage(Date.now()))) return false;
+  S.apps.asked = Date.now(); saveSoon();
+  return true;
+}
+const whenText = t => { const d = new Date(t); return d.toDateString() === new Date().toDateString() ? 'alle ' + hm(t) : d.getDate() + '/' + (d.getMonth() + 1) + ' alle ' + hm(t); };
+function appsPage() {
+  const list = S.apps.list;
+  if (!list.length && S.child && Date.now() - (S.apps.asked || 0) > 600000) askApps(); // first time: ask
+  const out = [header('App installate', 'child'), h('p', { class: 'sub' }, 'Tocca il menu di un\'app per darle un limite di tempo o bloccarla.')];
+  out.push(h('div', { class: 'card' },
+    h('p', {}, !list.length ? (S.apps.asked ? 'Sto chiedendo l\'elenco al telefono di tuo figlio: arriva entro un paio di minuti.' : 'Ancora nessun elenco.')
+      : list.length + ' app' + (S.rules.limits.length ? ' · ' + limitCounts(S.rules) : '') + ' · aggiornato ' + whenText(S.apps.time)),
+    h('button', { class: 'btn ghost', onclick: async () => {
+      toast(await askApps() ? 'Chiesto al telefono di tuo figlio: arriva entro un paio di minuti' : 'Prima collega il telefono di tuo figlio', 4000); render();
+    } }, 'Aggiorna l\'elenco')));
+  const rows = [...list.map(a => ({ ...a, installed: true }))];
+  for (const l of S.rules.limits) if (!rows.some(x => x.pkg === l.pkg)) rows.push({ pkg: l.pkg, label: l.label, installed: false });
+  const used = new Map(S.usage.day === today() ? S.usage.apps.map(a => [a.pkg, a.minutes]) : []);
+  const box = h('div', { class: 'apps-list' });
+  for (const a of rows) {
+    const lim = S.rules.limits.find(l => l.pkg === a.pkg);
+    const sel = h('select', { class: 'limit-select', 'aria-label': 'Regola per ' + a.label, onchange: async ev => {
+      const v = Number(ev.target.value);
+      const edit = JSON.parse(JSON.stringify(S.rules));
+      edit.limits = L.setLimit(edit.limits, a.pkg, a.label, v);
+      ev.target.disabled = true;
+      if (await sendRules(edit)) toast(v === L.LOCKED ? a.label + ' bloccata: vale entro un paio di minuti' : 'Fatto: vale entro un paio di minuti', 4000);
+      else toast('Prima collega il telefono di tuo figlio');
+      render();
+    } }, CHOICES.map(c => h('option', { value: String(c), selected: (lim ? lim.minutes : -1) === c }, limitLabel(c))));
+    const sub = [used.has(a.pkg) ? 'Oggi ' + dur(used.get(a.pkg)) : '', a.installed ? '' : 'non più nell\'elenco'].filter(Boolean).join(' · ');
+    box.append(h('div', { class: 'card app-limit', 'data-name': a.label.toLowerCase() },
+      h('div', {}, h('div', { class: 't' }, limitIcon(lim) + ' ' + a.label), h('div', { class: 's' }, sub)), sel));
+  }
+  if (rows.length > 12) {
+    // Filtered in place: the page is not redrawn while typing.
+    const q = h('input', { type: 'search', class: 'apps-search', placeholder: 'Cerca un\'app', 'aria-label': 'Cerca un\'app', autocomplete: 'off' });
+    q.addEventListener('input', () => { const v = q.value.trim().toLowerCase(); for (const c of box.children) c.style.display = !v || c.dataset.name.includes(v) ? '' : 'none'; });
+    out.push(q);
+  }
+  out.push(box);
+  out.push(h('p', { class: 'caption' }, '«In pausa»: per oggi non si apre, ma tuo figlio può chiederti 15 minuti. «Bloccata»: non si apre e non può chiedere tempo, finché non la sblocchi tu.'));
+  out.push(h('p', { class: 'caption' }, 'Telefono, contatti, sveglia, SOS e Phylax funzionano sempre e non sono nell\'elenco. Arrivano solo i nomi delle app, mai cosa c\'è dentro.'));
   return out;
 }
 // ---------- 0.23: site filter ----------

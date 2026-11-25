@@ -9,7 +9,7 @@ const subtle = globalThis.crypto.subtle;
 export const CODE_PREFIX = 'TG1.', WIRE_PREFIX = 'T1.';
 export const C2P = 1, P2C = 2, WIRE_VERSION = 1, TOPIC_LENGTH = 32;
 // 0.22: USAGE (child: minutes per app), RULES (parent: screen-time rules), EXTRA (more time: asked / granted / refused).
-export const TYPES = ['ALERT', 'CASE_OPEN', 'CASE_FRAGMENTS', 'STATUS', 'CLOSE_CASE', 'PUSH', 'USAGE', 'RULES', 'EXTRA', 'LOCATION', 'WEEK']; // 0.28: WEEK = weekly summary
+export const TYPES = ['ALERT', 'CASE_OPEN', 'CASE_FRAGMENTS', 'STATUS', 'CLOSE_CASE', 'PUSH', 'USAGE', 'RULES', 'EXTRA', 'LOCATION', 'WEEK', 'APPS']; // 0.28: WEEK = weekly summary; 0.29: APPS = installed apps
 export const EXTRA_ASK = 0, EXTRA_YES = 1, EXTRA_NO = 2;
 /** 0.24 LOCATION: parent asks (LOC_ASK), child answers once (LOC_HERE «lat,lon,metri,ora» / LOC_NONE why) or a safe place event. */
 export const LOC_ASK = 0, LOC_HERE = 1, LOC_NONE = 2, LOC_PLACE = 3;
@@ -191,12 +191,17 @@ export function closeMessage(time, caseId, outcome) { return encodeMessage({ typ
 // ---- 0.22: screen time (same text lines as ScreenRules.java) ----
 /** rules = { version, night: [start, end] | null (minutes of the day), limits: [{ pkg, label, minutes }] (0 = blocked),
  *  0.23: sites: ['ADULT', 'GAMBLING', 'VIOLENCE'], allow: [domain], deny: [domain] } */
+/** 0.29: limit value for «Bloccata» (line «lock|pkg|label»): cannot be opened, no «15 minuti in più». */
+export const LOCKED = -2;
 export const SITE_CATEGORIES = [['ADULT', 'Siti per adulti'], ['GAMBLING', 'Scommesse e casinò'], ['VIOLENCE', 'Violenza estrema']];
 export function rulesLines(r) {
   const out = [];
   if (r.night && r.night[0] !== r.night[1]) out.push('night|' + r.night[0] + '|' + r.night[1]);
   if (r.school && r.school.days && r.school.end > r.school.start) out.push('school|' + r.school.days + '|' + r.school.start + '|' + r.school.end);
-  for (const l of r.limits || []) out.push('limit|' + l.pkg + '|' + l.minutes + '|' + String(l.label || l.pkg).replace(/\|/g, ' ').slice(0, 40));
+  for (const l of r.limits || []) {
+    const label = String(l.label || l.pkg).replace(/\|/g, ' ').trim().slice(0, 40) || l.pkg;
+    out.push(l.minutes === LOCKED ? 'lock|' + l.pkg + '|' + label : 'limit|' + l.pkg + '|' + l.minutes + '|' + label);
+  }
   for (const [c] of SITE_CATEGORIES) if ((r.sites || []).includes(c)) out.push('site|' + c);
   for (const d of r.allow || []) out.push('allow|' + d);
   for (const d of r.deny || []) out.push('deny|' + d);
@@ -217,6 +222,30 @@ export function setPlace(list, p) {
   if (!has && list.length >= 10) return list;
   return has ? list.map(x => x.name === p.name ? p : x) : [...list, p];
 }
+/** Same as ScreenRules.setLimit: minutes, 0 = in pause today, LOCKED = blocked, other negative = no limit (removed). */
+export function setLimit(limits, pkg, label, minutes) {
+  if (!pkg || pkg.includes('|')) return limits;
+  const rest = (limits || []).filter(l => l.pkg !== pkg);
+  if (minutes < 0 && minutes !== LOCKED) return rest;
+  if (rest.length === (limits || []).length && rest.length >= 60) return limits;
+  const label2 = String(label || pkg).replace(/\|/g, ' ').trim().slice(0, 40) || pkg;
+  const item = { pkg, label: label2, minutes: minutes === LOCKED ? LOCKED : Math.min(minutes, 1440) };
+  const i = (limits || []).findIndex(l => l.pkg === pkg);
+  if (i < 0) return [...rest, item];
+  const out = [...limits]; out[i] = item; return out;
+}
+/** 0.29: APPS fragments «label|package» -> [{ label, pkg }]. */
+export function parseApps(fragments) {
+  const out = [];
+  for (const f of fragments || []) {
+    const cut = f.lastIndexOf('|');
+    if (cut <= 0 || cut === f.length - 1 || out.length >= 200) continue;
+    const pkg = f.slice(cut + 1);
+    if (!out.some(a => a.pkg === pkg)) out.push({ label: f.slice(0, cut), pkg });
+  }
+  return out;
+}
+export function askAppsMessage(time) { return encodeMessage({ type: 'APPS', time }); }
 export function parseRules(version, lines) {
   const r = { version, night: null, school: null, limits: [], sites: [], allow: [], deny: [], places: [] };
   for (const line of lines || []) {
@@ -227,9 +256,11 @@ export function parseRules(version, lines) {
     } else if (f[0] === 'school' && f.length >= 4) { // 0.27: days as bits (Monday = 1), minutes of the day
       const d = parseInt(f[1], 10) & 127, a = parseInt(f[2], 10), b = parseInt(f[3], 10);
       if (d > 0 && a >= 0 && b <= 1440 && b > a) r.school = { days: d, start: a, end: b };
-    } else if (f[0] === 'limit' && f.length >= 3 && f[1] && r.limits.length < 60) {
+    } else if (f[0] === 'limit' && f.length >= 3 && f[1]) {
       const m = parseInt(f[2], 10);
-      if (m >= 0) r.limits.push({ pkg: f[1], label: f.slice(3).join('|') || f[1], minutes: Math.min(m, 1440) });
+      if (m >= 0) r.limits = setLimit(r.limits, f[1], f.slice(3).join('|') || f[1], Math.min(m, 1440));
+    } else if (f[0] === 'lock' && f.length >= 2 && f[1]) { // 0.29
+      r.limits = setLimit(r.limits, f[1], f.slice(2).join('|') || f[1], LOCKED);
     } else if (f[0] === 'place' && f.length >= 5) {
       r.places = setPlace(r.places, makePlace(f.slice(4).join('|'), f[1], f[2], parseInt(f[3], 10)));
     } else if (f[0] === 'site' && SITE_CATEGORIES.some(([c]) => c === f[1]) && !r.sites.includes(f[1])) r.sites.push(f[1]);
