@@ -8,7 +8,7 @@ import * as L from './link.js';
 import * as Bio from './bio.js';
 import * as QR from './qr.js';
 
-const VERSION = '0.25';
+const VERSION = '0.26';
 const SILENT_MS = 60 * 60 * 1000;            // like LinkPolicy: warning after 1 hour without messages
 const MAX_AGE_S = 24 * 60 * 60;              // reject messages published > 24 h after they were written (replays)
 const LOCK_AFTER_MS = 5 * 60 * 1000;         // PIN again after 5 minutes in the background
@@ -40,8 +40,14 @@ const db = (() => {
   };
 })();
 
+// 0.26: more children in one app. Slot 0 keeps the keys of earlier versions; slot n puts 'c<n>:' in front.
+const MAX_CHILDREN = 4;
+const CHILD_KEYS = ['pair', 'child', 'sent', 'seenMax', 'lastSeen', 'outbox', 'archived', 'pushSent', 'pushState', 'vault', 'mboxSince'];
+const K = (name, slot = S.slot) => slot ? 'c' + slot + ':' + name : name;
+
 // ---------- State ----------
 const S = {
+  slot: 0, family: { slots: [], names: {}, current: 0 }, others: {}, // 0.26: children (see K)
   pair: null,        // { topic, notifyTopic, priv (CryptoKey, not extractable), pub (Uint8Array), code, created }
   child: null,       // { spki (b64), verification }
   keys: null,
@@ -145,7 +151,7 @@ const Vault = (() => {
     async withPin(kek) {
       const box = await db.get('dkPin');
       if (!S.dkRaw && box) { try { await use(await unseal(await gcm(kek), box, WRAP)); } catch { /* damaged: start over */ } }
-      if (!S.dkRaw) { await db.del('vault'); await db.del('dkBio'); await use(crypto.getRandomValues(new Uint8Array(32))); }
+      if (!S.dkRaw) { for (let n = 0; n < MAX_CHILDREN; n++) await db.del(K('vault', n)); await db.del('dkBio'); await use(crypto.getRandomValues(new Uint8Array(32))); }
       await db.set('dkPin', await seal(await gcm(kek), S.dkRaw, WRAP));
       if (S.bio && !await db.get('dkBio')) await V.addBio();
     },
@@ -169,11 +175,11 @@ const Vault = (() => {
       const snap = { v: 1, alerts: S.alerts, reports: [...S.reports.values()], state: S.state, detail: S.detail,
         lastStatus: S.lastStatus, lastSeen: S.lastSeen, lastC2P: S.lastC2P, lastP2C: S.lastP2C,
         usage: S.usage, rules: S.rules, requests: S.requests, where: S.where, battery: S.battery };
-      await db.set('vault', await seal(S.dk, enc.encode(JSON.stringify(snap)), AAD));
+      await db.set(K('vault'), await seal(S.dk, enc.encode(JSON.stringify(snap)), AAD));
     },
     /** Puts the saved copy into S. Counters come with it, so re-reading the mailbox does not add the same messages twice. */
     async load() {
-      const box = S.dk && await db.get('vault');
+      const box = S.dk && await db.get(K('vault'));
       if (!box) return false;
       let snap;
       try { snap = JSON.parse(new TextDecoder().decode(await unseal(S.dk, box, AAD))); } catch { return false; }
@@ -216,7 +222,7 @@ function setArchived(a, on) {
   const k = alertKey(a);
   S.archived.delete(k); S.archived.set(k, on); // false = put back by the parent: a re-read closure won't archive it again
   while (S.archived.size > MAX_ARCHIVED_KEYS) S.archived.delete(S.archived.keys().next().value);
-  db.set('archived', [...S.archived]).catch(() => {});
+  db.set(K('archived'), [...S.archived]).catch(() => {});
   saveSoon();
 }
 function closeLocally(id) {
@@ -263,8 +269,16 @@ function apply(m, receivedAt) {
       if (m.time < S.usage.time) return 'NONE';
       S.usage = { day: m.text, time: m.time, apps: L.parseUsage(m.fragments) };
       return 'NONE';
+    // 0.26: what the other parent decided, echoed by the child's phone to every parent.
+    case 'RULES':
+      if (m.caseId > S.rules.version) S.rules = L.parseRules(m.caseId, m.fragments);
+      return 'NONE';
+    case 'CLOSE_CASE':
+      closeLocally(m.caseId);
+      return 'NONE';
     case 'EXTRA':
-      if (m.outcome !== L.EXTRA_ASK || !m.text) return 'NONE';
+      if (m.outcome !== L.EXTRA_ASK) { S.requests = S.requests.filter(r => r.pkg !== m.text); return 'NONE'; }
+      if (!m.text) return 'NONE';
       S.requests = [{ pkg: m.text, label: m.app, minutes: m.caseId, time: m.time }, ...S.requests.filter(r => r.pkg !== m.text)].slice(0, 20);
       return 'EXTRA';
     case 'LOCATION': {
@@ -286,7 +300,7 @@ function apply(m, receivedAt) {
     }
     case 'PUSH':
       S.pushState = m.outcome === L.PUSH_ACTIVE ? 'ok' : m.outcome === L.PUSH_EXPIRED ? 'expired' : S.pushState;
-      db.set('pushState', S.pushState).catch(() => {});
+      db.set(K('pushState'), S.pushState).catch(() => {});
       return 'NONE';
     default: return 'NONE';
   }
@@ -311,8 +325,8 @@ async function handle(ev, live) {
         await L.open(k.c2p, L.C2P, ev.message, 0);
         S.child = { spki: childB64, verification: k.verification };
         S.keys = k; S.showCode = false; // the code is no longer needed on screen
-        await db.set('child', S.child);
-        S.pushState = null; db.del('pushState').catch(() => {});
+        await db.set(K('child'), S.child);
+        S.pushState = null; db.del(K('pushState')).catch(() => {});
         if (S.subscribed) resendPush(true); // new pairing: hand the existing notification permission to the new child
       } else if (S.child.spki !== childB64) { S.error = 'Messaggio da un telefono non abbinato: ignorato.'; return; }
       await ensureKeys();
@@ -323,8 +337,8 @@ async function handle(ev, live) {
       const what = apply(m, ev.time * 1000);
       saveSoon();
       const fresh = header.counter > S.seenMax;
-      if (fresh) { S.seenMax = header.counter; db.set('seenMax', S.seenMax); }
-      if (S.lastSeen - S.lastSeenSaved > 60000) { S.lastSeenSaved = S.lastSeen; db.set('lastSeen', S.lastSeen); }
+      if (fresh) { S.seenMax = header.counter; db.set(K('seenMax'), S.seenMax); }
+      if (S.lastSeen - S.lastSeenSaved > 60000) { S.lastSeenSaved = S.lastSeen; db.set(K('lastSeen'), S.lastSeen); }
       if (live && fresh) announce(what, m);
     } else if (hd.direction === L.P2C && await ensureKeys()) {
       // Our own "close report" (also from another device with this pairing): the report is gone.
@@ -405,9 +419,9 @@ setInterval(() => { if (document.visibilityState === 'visible') connect(); sched
 async function sendToChild(plain) {
   if (!await ensureKeys()) return false;
   S.sent = L.nextCounter(S.sent, Date.now());
-  await db.set('sent', S.sent);
+  await db.set(K('sent'), S.sent);
   S.outbox.push(await L.seal(S.keys.p2c, L.P2C, null, S.sent, plain));
-  await db.set('outbox', S.outbox);
+  await db.set(K('outbox'), S.outbox);
   drain();
   return true;
 }
@@ -422,12 +436,13 @@ let draining = false;
 async function drain() {
   if (draining || !S.pair) return;
   draining = true;
-  while (S.outbox.length) {
+  const slot = S.slot;
+  while (S.outbox.length && slot === S.slot) {
     try {
       // 0.17: to the child's mailbox only (ntfy.sh is no longer used).
       if (!await ensureKeys()) break;
       await L.mailboxPost(await L.mailboxName(S.pair.topic, 'p2c'), S.keys.mailboxAuth, S.outbox[0]);
-      S.outbox.shift(); S.outboxWait = 5000; await db.set('outbox', S.outbox);
+      S.outbox.shift(); S.outboxWait = 5000; await db.set(K('outbox'), S.outbox);
     }
     catch {
       S.error = 'Comando non ancora inviato (rete): nuovo tentativo tra ' + Math.round(S.outboxWait / 1000) + ' s.';
@@ -465,10 +480,10 @@ async function sendPushSetup(sub, v) {
   const msg = L.encodeMessage({ type: 'PUSH', time: Date.now(),
     fragments: [j.endpoint, j.keys.p256dh, j.keys.auth, v.priv, v.pub, location.origin + '/'] });
   S.sent = L.nextCounter(S.sent, Date.now());
-  await db.set('sent', S.sent);
+  await db.set(K('sent'), S.sent);
   S.outbox.push(await L.seal(S.keys.p2c, L.P2C, null, S.sent, msg));
-  await db.set('outbox', S.outbox);
-  S.pushSentEndpoint = j.endpoint; await db.set('pushSent', j.endpoint);
+  await db.set(K('outbox'), S.outbox);
+  S.pushSentEndpoint = j.endpoint; await db.set(K('pushSent'), j.endpoint);
   S.pushState = 'waiting';
   drain();
   return true;
@@ -506,6 +521,134 @@ async function resendPush(force) {
   } catch { /* retried at the next opening */ }
 }
 
+// ---------- 0.26: children ----------
+/** Puts one child's saved keys and counters into S (the received data comes from its vault, see selectChild). */
+async function loadChild() {
+  S.pair = await db.get(K('pair')) || null;
+  S.child = await db.get(K('child')) || null;
+  S.showCode = !S.child;
+  S.keys = null;
+  S.sent = await db.get(K('sent')) || 0;
+  S.seenMax = await db.get(K('seenMax')) || 0;
+  S.lastSeen = S.lastSeenSaved = await db.get(K('lastSeen')) || 0;
+  S.outbox = await db.get(K('outbox')) || []; S.outboxWait = 5000;
+  S.archived = new Map(await db.get(K('archived')) || []);
+  S.pushSentEndpoint = await db.get(K('pushSent')) || null;
+  S.pushState = await db.get(K('pushState')) || null;
+  S.mboxSince = 0; S.mboxSinceP2c = 0; fromStart = true; S.loaded = false; S.online = false; S.error = '';
+  S.showArchived = false; S.editRules = null; S.placeForm = false;
+}
+const childName = slot => (S.family.names[slot] || '').trim() || 'Figlio ' + ((S.family.slots.indexOf(slot) + 1) || S.family.slots.length + 1);
+async function selectChild(slot) {
+  if (slot === S.slot) return;
+  await enqueue(async () => {
+    clearTimeout(saveTimer);
+    if (S.slot >= 0) await Vault.save().catch(() => {});
+    S.slot = slot; S.family.current = slot;
+    if (S.peekSince) delete S.peekSince[slot];
+    if (S.peekFresh) delete S.peekFresh[slot];
+    delete S.others[slot];
+    await db.set('family', S.family);
+    await loadChild();
+    resetData();
+    if (S.dk) await Vault.load().catch(() => false);
+  });
+  render(); connect();
+  if (S.outbox.length) drain();
+  resendPush(false).then(scheduleRender);
+  peekOthers();
+}
+async function addChild() {
+  let free = -1;
+  for (let n = 0; n < MAX_CHILDREN && free < 0; n++) if (!S.family.slots.includes(n)) free = n;
+  if (free < 0) { toast('Al massimo ' + MAX_CHILDREN + ' figli in questa app.'); return; }
+  const name = prompt('Come si chiama? (solo per distinguere i figli in questa app)', '');
+  await selectChild(free);
+  if (name && name.trim()) { S.family.names[free] = name.trim().slice(0, 20); await db.set('family', S.family); }
+  await newPairing();
+  go('pair');
+}
+async function renameChild() {
+  const name = prompt('Nome da mostrare per questo figlio (resta su questo telefono)', childName(S.slot));
+  if (name === null) return;
+  S.family.names[S.slot] = name.trim().slice(0, 20);
+  await db.set('family', S.family);
+  render();
+}
+async function removeChild() {
+  if (!confirm('Togliere ' + childName(S.slot) + '? Si cancellano il collegamento e i suoi avvisi da questo telefono. Sul telefono del ragazzo scollega poi questo genitore.')) return;
+  const gone = S.slot;
+  await enqueue(async () => {
+    for (const k of CHILD_KEYS) await db.del(K(k, gone));
+    S.family.slots = S.family.slots.filter(n => n !== gone);
+    delete S.family.names[gone]; delete S.others[gone];
+    await db.set('family', S.family);
+  });
+  const next = S.family.slots.length ? S.family.slots[0] : 0;
+  S.slot = -1; // forces the switch, also to slot 0 when it was the one removed
+  await selectChild(next);
+  go('');
+}
+/**
+ * The other children: how many alerts to look at (saved ones still open + important new ones in their mailbox),
+ * without touching what is on screen. Only a number for the chips; their data is read when you switch to them.
+ */
+let peeking = false;
+async function peekOthers() {
+  if (peeking || !S.dk || !S.ready) return;
+  peeking = true;
+  try {
+    for (const slot of S.family.slots) {
+      if (slot === S.slot) continue;
+      const pair = await db.get(K('pair', slot)), child = await db.get(K('child', slot));
+      if (!pair || !child) { S.others[slot] = 0; continue; }
+      let saved = 0, last = 0;
+      const box = await db.get(K('vault', slot));
+      if (box) try {
+        const snap = JSON.parse(new TextDecoder().decode(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: L.unb64(box.iv), additionalData: new TextEncoder().encode('phylax-vault-1') }, S.dk, L.unb64(box.ct))));
+        saved = (snap.alerts || []).filter(a => !a.archived).length + (snap.reports || []).length + (snap.requests || []).length;
+        last = snap.lastC2P || 0;
+      } catch { /* unreadable: count only new ones */ }
+      const keys = await L.derive(pair.priv, await L.importPublic(L.unb64(child.spki)), pair.topic);
+      const p = S.peekSince || (S.peekSince = {});
+      let since = p[slot] || 0, fresh = 0;
+      const name = await L.mailboxName(pair.topic, 'c2p');
+      for (let page = 0; page < 10; page++) {
+        const r = await L.mailboxPoll(name, since);
+        for (const m of r.messages) {
+          try {
+            const { header, plaintext } = await L.open(keys.c2p, L.C2P, m.msg, last);
+            const msg = L.decodeMessage(plaintext);
+            if (header.counter > last && (msg.type === 'ALERT' || msg.type === 'CASE_OPEN' || (msg.type === 'EXTRA' && msg.outcome === L.EXTRA_ASK))) fresh++;
+          } catch { /* old or not ours */ }
+        }
+        since = r.next;
+        if (r.messages.length < 100) break;
+      }
+      const f = S.peekFresh || (S.peekFresh = {});
+      f[slot] = (p[slot] ? f[slot] || 0 : 0) + fresh;
+      S.others[slot] = saved + f[slot];
+      p[slot] = since;
+    }
+  } catch { /* offline: try again later */ } finally { peeking = false; }
+  scheduleRender();
+}
+setInterval(() => { if (document.visibilityState === 'visible' && S.unlocked) peekOthers(); }, 60000);
+
+/** Chips with the children's names under the title; nothing with a single child. */
+function childBar() {
+  const slots = [...S.family.slots];
+  if (!slots.includes(S.slot) && S.pair) slots.push(S.slot);
+  if (slots.length < 2) return null;
+  return h('div', { class: 'kids', role: 'tablist', 'aria-label': 'Figli' },
+    ...slots.map(n => {
+      const c = n === S.slot ? 0 : S.others[n] || 0;
+      return h('button', { class: 'kid' + (n === S.slot ? ' on' : ''), role: 'tab', 'aria-selected': String(n === S.slot), onclick: () => selectChild(n) },
+        childName(n), c ? h('span', { class: 'badge' }, String(c)) : null);
+    }),
+    S.family.slots.length < MAX_CHILDREN ? h('button', { class: 'kid add', 'aria-label': 'Aggiungi un figlio', onclick: addChild }, '+') : null);
+}
+
 async function newPairing() {
   const kp = await L.newKeyPair();
   const topic = L.newTopic();
@@ -514,10 +657,11 @@ async function newPairing() {
   S.pair = { topic, notifyTopic: null, priv: kp.privateKey, pub, code: L.pairingCode(topic, pub), created: Date.now() };
   S.child = null; S.keys = null; S.pushState = null; S.pushSentEndpoint = null; S.sent = 0; S.seenMax = 0; S.lastSeen = 0; S.outbox = []; S.loaded = false; S.showCode = true;
   resetData();
-  await db.set('pair', S.pair);
+  await db.set(K('pair'), S.pair);
   S.archived = new Map();
   S.mboxSince = 0; S.mboxSinceP2c = 0; fromStart = true; S.online = false;
-  for (const k of ['child', 'sent', 'seenMax', 'lastSeen', 'outbox', 'archived', 'pushSent', 'pushState', 'vault', 'mboxSince']) await db.del(k);
+  for (const k of ['child', 'sent', 'seenMax', 'lastSeen', 'outbox', 'archived', 'pushSent', 'pushState', 'vault', 'mboxSince']) await db.del(K(k));
+  if (!S.family.slots.includes(S.slot)) { S.family.slots.push(S.slot); S.family.slots.sort(); await db.set('family', S.family); }
   clearTimeout(saveTimer);
   connect();
 }
@@ -576,6 +720,7 @@ function page(r) {
   if (name === 'advanced') return advancedPage();
   if (name === 'time') return timePage();
   if (name === 'sites') return sitesPage();
+  if (name === 'talk') return talkPage(arg ? decodeURIComponent(arg) : null);
   if (name === 'child') return [...childPage(), tabBar('child')];
   if (name === 'settings') return [...settingsPage(), tabBar('settings')];
   return [...homePage(), tabBar('alerts')];
@@ -662,6 +807,7 @@ async function afterUnlock() {
   }
   S.ready = true;
   render(); connect();
+  setTimeout(peekOthers, 3000);
 }
 
 // ---------- Face ID (WebAuthn passkey on this iPhone; the PIN always works too) ----------
@@ -739,7 +885,7 @@ function summaryCard() {
 }
 
 function homePage() {
-  const out = [header('Phylax Genitore'), summaryCard()];
+  const out = [header('Phylax Genitore'), childBar(), summaryCard()];
   if (S.pair && !S.online && S.loaded) out.push(h('p', { class: 'caption' }, h('span', { class: 'dot' }), 'Senza collegamento a internet: riprovo da solo…'));
   if (S.requests.length) {
     out.push(h('div', { class: 'section' }, 'Richieste di tempo'));
@@ -775,7 +921,7 @@ function homePage() {
 
 function childPage() {
   const st = childState();
-  const out = [header('Figlio'), h('div', { class: 'status ' + st.cls }, h('h2', {}, st.title), h('p', {}, st.line),
+  const out = [header(S.family.slots.length > 1 ? childName(S.slot) : 'Figlio'), childBar(), h('div', { class: 'status ' + st.cls }, h('h2', {}, st.title), h('p', {}, st.line),
     h('button', { class: 'btn white', onclick: () => go('pair') }, !S.pair ? 'Abbina' : !S.child ? 'Mostra il QR' : 'Collegamento e codice di verifica'))];
   if (st.cls === 'broken') {
     out.push(h('div', { class: 'card' }, h('p', { class: 'card-head' }, 'Cosa fare'),
@@ -790,6 +936,8 @@ function childPage() {
   out.push(usageCard());
   out.push(h('div', { class: 'section' }, 'Siti'));
   out.push(navRow('🌐', 'Filtro siti', sitesSummary(S.rules), () => { S.editRules = null; go('sites'); }, true));
+  out.push(h('div', { class: 'section' }, 'Parlarne'));
+  out.push(navRow('💬', 'Come parlarne con tuo figlio', 'Prima di installarlo, per età, quando arriva un avviso', () => go('talk')));
   out.push(h('div', { class: 'section' }, 'Cosa fa Phylax'));
   out.push(h('div', { class: 'card' },
     h('ul', { class: 'plain' },
@@ -1007,8 +1155,13 @@ function settingsPage() {
     out.push(navRow('☺', 'Sblocca con Face ID', S.bio ? 'Attivo · tocca per spegnerlo' : 'Spento · tocca per attivarlo', toggleBio));
   }
   out.push(navRow('🔒', 'Blocca ora', S.bio ? 'Chiede Face ID o il PIN' : 'Chiede di nuovo il PIN', () => { S.unlocked = false; render(); }));
-  out.push(h('div', { class: 'section' }, 'Altro'));
+  out.push(h('div', { class: 'section' }, 'Figli'));
+  out.push(navRow('✎', 'Nome del figlio', childName(S.slot) + ' · tocca per cambiarlo', renameChild));
   out.push(navRow('📱', 'Telefono di tuo figlio', 'Collegamento e codice di verifica', () => go('pair')));
+  if (S.family.slots.length < MAX_CHILDREN) out.push(navRow('+', 'Aggiungi un figlio', 'Fino a ' + MAX_CHILDREN + ' figli, ognuno con il suo telefono', addChild));
+  out.push(navRow('💬', 'Come parlarne con tuo figlio', 'Prima di installarlo, per età, quando arriva un avviso', () => go('talk')));
+  if (S.pair) out.push(navRow('−', 'Togli questo figlio', 'Toglie ' + childName(S.slot) + ' da questa app', removeChild));
+  out.push(h('div', { class: 'section' }, 'Altro'));
   out.push(navRow('ⓘ', 'Avanzate e informazioni', 'Versione, collegamento, privacy', () => go('advanced')));
   return out;
 }
@@ -1043,6 +1196,7 @@ function alertCard(a, archived) {
     h('div', { class: 'alert-top' }, h('span', { class: 'chip ' + level[0] }, level[1]), h('span', { class: 'time' }, hm(a.time))),
     h('h3', {}, a.category), h('p', { class: 'meta' }, a.app), h('div', { class: 'quote' }, a.text),
     note ? h('p', { class: 'caption' }, note) : null, limit,
+    archived ? null : h('button', { class: 'link', onclick: () => go('talk/' + encodeURIComponent(a.category)) }, 'Come parlarne ›'),
     h('button', { class: 'link', onclick: () => { setArchived(a, !archived); toast(archived ? 'Rimesso tra gli avvisi' : 'Avviso archiviato'); render(); } },
       archived ? 'Rimetti tra gli avvisi' : 'Archivia'));
 }
@@ -1110,10 +1264,35 @@ function pairPage() {
       h('li', {}, 'Sul telefono di tuo figlio: Phylax › Telefono del genitore › PIN genitore.'),
       h('li', {}, 'Fotografa il QR qui sopra (o incolla il codice) e tocca Abbina.'),
       h('li', {}, 'Qui comparirà il codice di verifica a 6 cifre.'))));
+  out.push(h('p', { class: 'caption' }, 'Mamma e papà: anche l\'altro genitore abbina la sua app allo stesso telefono. Sul telefono del figlio: Phylax › PIN › Telefono del genitore › «Aggiungi l\'altro genitore». Ricevete gli stessi avvisi e vedete le stesse regole.'));
   out.push(h('button', { class: 'btn danger', onclick: async () => {
     if (!confirm('Nuovo abbinamento? Il telefono di tuo figlio non potrà più raggiungere questa app finché non incolli il nuovo codice.')) return;
     await newPairing(); render();
   } }, 'Nuovo abbinamento'));
+  return out;
+}
+
+// ---------- 0.26: «Come parlarne» (advice.json, the same file the Android parent app uses) ----------
+let advice = null, adviceAsked = false;
+function loadAdvice() {
+  if (adviceAsked) return;
+  adviceAsked = true;
+  fetch('advice.json').then(r => r.json()).then(j => { advice = j; scheduleRender(); }).catch(() => { adviceAsked = false; });
+}
+function talkPage(topic) {
+  const out = [header('Come parlarne', true), h('p', { class: 'sub' }, 'Consigli per genitori, non regole: ogni ragazzo è diverso.')];
+  loadAdvice();
+  if (!advice) { out.push(h('p', { class: 'caption' }, 'Carico i consigli…')); return out; }
+  const block = s => [h('div', { class: 'section' }, s.title), h('div', { class: 'card' }, h('ul', { class: 'plain' }, ...s.points.map(p => h('li', {}, p))))];
+  const low = (topic || '').toLowerCase();
+  const t = topic ? advice.topics.find(x => x.match.some(m => low.includes(m))) : null;
+  if (t) out.push(...block(t));
+  out.push(h('p', {}, advice.intro));
+  for (const s of advice.sections) out.push(...block(s));
+  if (!t) { out.push(h('div', { class: 'section' }, 'Per argomento')); for (const x of advice.topics) out.push(h('div', { class: 'card' }, h('h3', { class: 'card-title' }, x.title), h('ul', { class: 'plain' }, ...x.points.map(p => h('li', {}, p))))); }
+  out.push(h('div', { class: 'section' }, 'A chi chiedere aiuto'));
+  out.push(h('div', { class: 'card' }, ...advice.help.map(x => h('p', {}, x))));
+  out.push(h('p', { class: 'caption' }, 'Testi di Phylax: non sostituiscono un professionista.'));
   return out;
 }
 
@@ -1170,16 +1349,9 @@ window.addEventListener('online', () => { drain(); connect(); });
   try {
     S.pin = await db.get('pin') || null;
     S.bio = await db.get('bio') || null;
-    S.pair = await db.get('pair') || null;
-    S.child = await db.get('child') || null;
-    S.showCode = !S.child;
-    S.sent = await db.get('sent') || 0;
-    S.seenMax = await db.get('seenMax') || 0;
-    S.lastSeen = S.lastSeenSaved = await db.get('lastSeen') || 0;
-    S.outbox = await db.get('outbox') || [];
-    S.archived = new Map(await db.get('archived') || []);
-    S.pushSentEndpoint = await db.get('pushSent') || null;
-    S.pushState = await db.get('pushState') || null;
+    S.family = await db.get('family') || { slots: await db.get('pair') ? [0] : [], names: {}, current: 0 };
+    S.slot = S.family.current || 0;
+    await loadChild();
   } catch {
     document.getElementById('app').replaceChildren(h('p', { class: 'caption center' }, 'Memoria del browser non disponibile (navigazione privata?).'));
     return;

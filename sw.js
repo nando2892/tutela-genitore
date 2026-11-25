@@ -1,6 +1,6 @@
 // Offline app shell only. Never caches the mailbox (alerts are rebuilt from the ciphertext at each opening).
-const CACHE = 'phylax-genitore-0.25';
-const SHELL = ['./', 'index.html', 'style.css', 'app.js', 'link.js', 'bio.js', 'qr.js', 'manifest.json',
+const CACHE = 'phylax-genitore-0.26';
+const SHELL = ['./', 'index.html', 'style.css', 'app.js', 'link.js', 'bio.js', 'qr.js', 'advice.json', 'manifest.json',
   'icons/icon.svg', 'icons/mark.svg', 'fonts/Baloo2-wght.ttf', 'icons/icon-192.png', 'icons/icon-512.png', 'icons/maskable-192.png', 'icons/maskable-512.png', 'icons/apple-touch-icon.png'];
 
 self.addEventListener('install', e => {

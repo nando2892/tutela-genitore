@@ -1,0 +1,137 @@
+{
+  "version": 1,
+  "note": "0.26: consigli per parlarne con il ragazzo. Testi originali di Phylax; non sostituiscono un professionista. Stesso file per l'app web e per l'app genitore Android.",
+  "intro": "Phylax funziona meglio come un patto, non come un controllo di nascosto. Qui trovi come presentarlo, come parlarne quando arriva un avviso e a chi chiedere aiuto.",
+  "sections": [
+    {
+      "title": "Prima di installarlo",
+      "points": [
+        "Parlatene prima, non dopo: spiega che serve a proteggerlo da adulti che approfittano e da situazioni pesanti, non a leggere le sue chat.",
+        "Fagli vedere cosa arriva a te: solo un avviso con un pezzetto di testo quando c'è un rischio, mai le chat intere né le foto.",
+        "Decidete insieme le regole: orari, limiti per app, notte. Scrivetele, anche su un foglio.",
+        "Mostragli il pulsante SOS: è suo, senza PIN, e lo può usare quando vuole.",
+        "Dite chiaramente quando le regole cambieranno: per esempio a un compleanno o con la fine della scuola."
+      ]
+    },
+    {
+      "title": "Secondo l'età",
+      "points": [
+        "8–10 anni: regole semplici e poche app. Usate il telefono insieme, nella stanza dove siete anche voi.",
+        "11–13 anni: è l'età dei primi social e delle prime chat di gruppo. Più spiegazioni e meno divieti; i limiti per app aiutano più dei blocchi totali.",
+        "14–17 anni: chiede più spazio, ed è giusto. Togli i limiti un po' alla volta e tieni gli avvisi sui rischi seri. Ditevi che le regole si rivedono insieme."
+      ]
+    },
+    {
+      "title": "Quando arriva un avviso",
+      "points": [
+        "Respira e non agire subito: un avviso è un segnale, non una prova. A volte è uno scherzo o una frase fraintesa.",
+        "Scegli un momento tranquillo, da soli, senza telefono in mano: in macchina o a passeggio va spesso meglio che faccia a faccia.",
+        "Comincia da una domanda aperta: «Come vanno le chat in questo periodo? C'è qualcosa che ti ha messo a disagio?»",
+        "Se racconta qualcosa, ringrazialo. Non togliere subito il telefono: insegna che dirlo costa caro, e la volta dopo non lo dirà.",
+        "Non leggere ad alta voce l'estratto e non dire «ho visto la chat»: parla del tema, non della frase.",
+        "Se c'è un adulto che chiede segreti, foto o incontri, la colpa non è mai di tuo figlio. Diglielo chiaramente."
+      ]
+    },
+    {
+      "title": "Se ha tolto un permesso o disinstallato l'app",
+      "points": [
+        "Succede: a quell'età si mettono alla prova i limiti. Chiedi perché, prima di arrabbiarti.",
+        "Forse una regola è troppo stretta: rivedetela insieme e rimettete l'app come parte del patto."
+      ]
+    },
+    {
+      "title": "Mamma e papà insieme",
+      "points": [
+        "Ognuno abbina la sua app: tutti e due ricevete gli stessi avvisi e vedete le stesse regole.",
+        "Mettetevi d'accordo prima di parlarne con il ragazzo, così non riceve due messaggi diversi.",
+        "Decidete chi risponde alle richieste di «15 minuti in più»: conta la prima risposta che arriva."
+      ]
+    }
+  ],
+  "topics": [
+    {
+      "match": ["adescamento", "incontro"],
+      "title": "Un adulto o una persona conosciuta online",
+      "points": [
+        "Chiedi chi è questa persona e come vi siete conosciuti, senza giudicare.",
+        "Ricorda la regola: nessun incontro con chi si conosce solo online senza un adulto di fiducia presente.",
+        "Se chiede segreti, regali, foto o di cambiare app: è un campanello d'allarme. Salvate le prove (screenshot) e bloccate il contatto.",
+        "Se c'è un pericolo concreto: Polizia Postale (commissariatodips.it) o il 112."
+      ]
+    },
+    {
+      "match": ["immagini intime", "ricatto"],
+      "title": "Foto intime: richieste o ricatti",
+      "points": [
+        "Non dare la colpa: chi ricatta conta proprio sulla vergogna.",
+        "Non pagate e non mandate altre foto. Salvate le prove e bloccate il contatto.",
+        "Contattate subito la Polizia Postale (commissariatodips.it). Telefono Azzurro (19696) aiuta anche a far rimuovere le immagini."
+      ]
+    },
+    {
+      "match": ["bullismo", "minaccia"],
+      "title": "Bullismo o minacce",
+      "points": [
+        "Ascolta tutto senza interrompere e chiedi da quanto va avanti.",
+        "Non rispondere tu al posto suo nelle chat: rischi di peggiorare le cose.",
+        "Salvate le prove. Se succede tra compagni, parlatene con la scuola, che ha un referente per il cyberbullismo.",
+        "Se è lui a prendere in giro qualcuno, spiegagli il peso delle parole senza umiliarlo."
+      ]
+    },
+    {
+      "match": ["sofferenza", "alimentare"],
+      "title": "Sofferenza, tristezza, cibo",
+      "points": [
+        "Questo è il momento di esserci, non di avere risposte. «Mi sembri giù, vuoi parlarne?»",
+        "Prendi sul serio ogni frase sul farsi del male, anche se sembra detta per scherzo.",
+        "Chiedi aiuto presto: medico di famiglia o pediatra, consultorio, Telefono Azzurro 19696. In pericolo immediato: 112."
+      ]
+    },
+    {
+      "match": ["droghe", "azzardo", "challenge", "sfida"],
+      "title": "Droghe, scommesse, sfide pericolose",
+      "points": [
+        "Chiedi cosa sa e cosa gira tra i suoi amici: spesso ne sanno più di noi.",
+        "Spiega i rischi con fatti concreti, senza esagerare: le prediche spaventose si ignorano.",
+        "Per le sfide online: ricordategli che chi le lancia non rischia niente, chi le fa sì."
+      ]
+    },
+    {
+      "match": ["odio", "armi", "violenza"],
+      "title": "Odio, armi, violenza",
+      "points": [
+        "Chiedi dove l'ha visto e cosa ne pensa, prima di dire la tua.",
+        "Contenuti che istigano all'odio o alla violenza si possono segnalare sulla piattaforma e alla Polizia Postale."
+      ]
+    },
+    {
+      "match": ["truffa", "account"],
+      "title": "Truffe e account rubati",
+      "points": [
+        "Cambiate subito la password e attivate la verifica in due passaggi.",
+        "Nessuno deve chiedere codici ricevuti via SMS: chi li chiede sta truffando."
+      ]
+    },
+    {
+      "match": ["sos"],
+      "title": "Ha premuto SOS",
+      "points": [
+        "Chiamalo subito. Se non risponde e hai attivato la posizione, guarda «Dov'è?».",
+        "Dopo, a mente fredda, chiedigli com'è andata e ringrazialo di averlo usato, anche se era un falso allarme."
+      ]
+    },
+    {
+      "match": ["nuova app"],
+      "title": "Ha installato una nuova app",
+      "points": [
+        "Chiedigli a cosa serve e fattela mostrare: spesso basta questo.",
+        "Se vi sembra adatta, decidete insieme un limite di tempo invece di vietarla."
+      ]
+    }
+  ],
+  "help": [
+    "Pericolo immediato: 112",
+    "Telefono Azzurro, per ragazzi e genitori: 19696 (anche chat su azzurro.it)",
+    "Polizia Postale, per adescamento, ricatti e truffe: commissariatodips.it"
+  ]
+}
